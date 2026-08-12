@@ -32,6 +32,8 @@ controls and rotate a webhook that has been exposed.
 
 Queued Slack payloads are stored root-only under `/var/lib/authtraild/slack-queue`. They can
 contain identity, source, command, and justification data, but never the webhook secret.
+Official Slack endpoints and enterprise relay hostnames must use HTTPS and the standard
+`/services/...` path. Strict validation rejects URL forms that could inject curl configuration.
 
 ## Command redaction is best-effort
 

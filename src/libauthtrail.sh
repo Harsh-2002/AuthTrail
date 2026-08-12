@@ -176,6 +176,11 @@ validate_config()
         *) die "invalid AUTH_TRAIL_SLACK_PROFILE: '$AUTH_TRAIL_SLACK_PROFILE' (expected actionable or verbose)" ;;
     esac
 
+    if [ "$AUTH_TRAIL_SLACK_ENABLED" = '1' ] && \
+        ! valid_slack_webhook_url "$AUTH_TRAIL_SLACK_WEBHOOK_URL"; then
+        die 'invalid AUTH_TRAIL_SLACK_WEBHOOK_URL (expected HTTPS with a /services/... path)'
+    fi
+
     require_number AUTH_TRAIL_COMMAND_MAX_LEN "$AUTH_TRAIL_COMMAND_MAX_LEN"
     require_number AUTH_TRAIL_PURPOSE_MIN_LENGTH "$AUTH_TRAIL_PURPOSE_MIN_LENGTH"
     require_number AUTH_TRAIL_PURPOSE_MAX_LENGTH "$AUTH_TRAIL_PURPOSE_MAX_LENGTH"
@@ -588,8 +593,7 @@ slack_http_post()
     SLACK_CURL_STATUS=0
     SLACK_RETRY_AFTER=0
 
-    if ! printf '%s' "$AUTH_TRAIL_SLACK_WEBHOOK_URL" | \
-        grep -Eq '^https://hooks\.slack(-gov)?\.com/services/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$'; then
+    if ! valid_slack_webhook_url "$AUTH_TRAIL_SLACK_WEBHOOK_URL"; then
         SLACK_HTTP_CODE=400
         return 1
     fi
@@ -622,6 +626,12 @@ slack_http_post()
         return 1
     fi
     return 0
+}
+
+valid_slack_webhook_url()
+{
+    printf '%s' "$1" | grep -Eq \
+        '^https://[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/services/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$'
 }
 
 record_slack_delivery()

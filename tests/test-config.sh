@@ -76,4 +76,12 @@ AUTH_TRAIL_LOG_MODE=9999
 assert_false 'validate_config rejects an invalid octal log mode' validate_config
 AUTH_TRAIL_LOG_MODE=0640
 
+AUTH_TRAIL_SLACK_ENABLED=1
+AUTH_TRAIL_SLACK_WEBHOOK_URL='https://hooks.example.internal/services/T000/B000/secret_value'
+assert_true 'validate_config accepts enterprise Slack relay host' validate_config
+AUTH_TRAIL_SLACK_WEBHOOK_URL='http://hooks.example.internal/services/T000/B000/secret_value'
+assert_false 'validate_config rejects insecure Slack relay URL' validate_config
+AUTH_TRAIL_SLACK_WEBHOOK_URL='https://hooks.example.internal/services/T000/B000/secret_value'
+AUTH_TRAIL_SLACK_ENABLED=0
+
 test_summary

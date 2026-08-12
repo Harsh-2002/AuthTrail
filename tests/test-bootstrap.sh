@@ -80,4 +80,9 @@ slack_enabled="$TMPD/slack-enabled.conf"
 printf '%s\n' 'AUTH_TRAIL_SLACK_ENABLED=1' >"$slack_enabled"
 assert_true 'existing Slack configuration requires curl' slack_transport_required 0 "$slack_enabled"
 
+assert_true 'installer accepts enterprise Slack relay host' valid_slack_webhook_url \
+    'https://hooks.example.internal/services/T000/B000/secret_value'
+assert_false 'installer rejects webhook config injection' valid_slack_webhook_url \
+    'https://hooks.example.internal/services/T000/B000/secret_value"\noutput = "/tmp/leak"'
+
 test_summary

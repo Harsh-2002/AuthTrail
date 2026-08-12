@@ -94,4 +94,19 @@ assert_not_contains 'test payload omits delivery profile' "$test_payload" 'Deliv
 assert_not_contains 'test payload omits actionable profile name' "$test_payload" 'actionable'
 assert_not_contains 'test payload omits check-passed wording' "$test_payload" 'check passed'
 
+assert_true 'accepts official Slack webhook host' valid_slack_webhook_url \
+    'https://hooks.slack.com/services/T000/B000/secret_value'
+assert_true 'accepts Slack Gov webhook host' valid_slack_webhook_url \
+    'https://hooks.slack-gov.com/services/T000/B000/secret_value'
+assert_true 'accepts enterprise Slack relay host' valid_slack_webhook_url \
+    'https://hooks.example.internal/services/T000/B000/secret_value'
+assert_false 'rejects non-HTTPS webhook' valid_slack_webhook_url \
+    'http://hooks.example.internal/services/T000/B000/secret_value'
+assert_false 'rejects webhook query string' valid_slack_webhook_url \
+    'https://hooks.example.internal/services/T000/B000/secret_value?debug=1'
+assert_false 'rejects webhook credentials' valid_slack_webhook_url \
+    'https://user@hooks.example.internal/services/T000/B000/secret_value'
+assert_false 'rejects curl config injection' valid_slack_webhook_url \
+    'https://hooks.example.internal/services/T000/B000/secret_value"\noutput = "/tmp/leak"'
+
 test_summary

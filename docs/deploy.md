@@ -51,7 +51,9 @@ Before a production rollout, confirm:
 
 Use the README command unchanged for local auditing, or append the optional Slack webhook argument
 shown there. The installer validates the webhook format and configuration; the first eligible event
-verifies delivery without posting an installation test card.
+verifies delivery without posting an installation test card. Official Slack endpoints and
+HTTPS enterprise relay hostnames are accepted when they use the standard `/services/...` path;
+HTTP URLs, credentials, ports, query strings, fragments, and malformed hostnames are rejected.
 
 The installer must finish with all of the following already complete:
 

@@ -74,3 +74,9 @@ slack_transport_required()
     [ "$slack_supplied" -eq 1 ] && return 0
     [ -r "$slack_config" ] && grep -q '^AUTH_TRAIL_SLACK_ENABLED=1$' "$slack_config"
 }
+
+valid_slack_webhook_url()
+{
+    printf '%s' "$1" | grep -Eq \
+        '^https://[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/services/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$'
+}

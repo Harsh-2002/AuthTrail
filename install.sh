@@ -106,8 +106,8 @@ if [ "$slack_transport_required" -eq 1 ] && ! command -v curl >/dev/null 2>&1; t
 fi
 
 if [ "$SLACK_WEBHOOK_SUPPLIED" -eq 1 ]; then
-    if ! printf '%s' "$SLACK_WEBHOOK" | grep -Eq '^https://hooks\.slack(-gov)?\.com/services/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$'; then
-        die 'invalid Slack Incoming Webhook URL (expected an official HTTPS Slack webhook)'
+    if ! valid_slack_webhook_url "$SLACK_WEBHOOK"; then
+        die 'invalid Slack Incoming Webhook URL (expected HTTPS with a /services/... path)'
     fi
 fi
 

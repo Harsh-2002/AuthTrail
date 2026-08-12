@@ -18,7 +18,8 @@ sh -c 'if ! command -v git >/dev/null 2>&1; then . /etc/os-release 2>/dev/null |
 
 Append `--slack-webhook='https://hooks.slack.com/services/...'` after `authtrail` to enable Slack
 in that same command. The first eligible event verifies delivery without adding an installation
-test card to the channel. AuthTrail never installs packages. It supports Debian/Ubuntu,
+test card to the channel. HTTPS Slack-compatible enterprise relay URLs with the same
+`/services/...` path shape are also supported. AuthTrail never installs packages. It supports Debian/Ubuntu,
 RHEL-family, and Fedora hosts with systemd and OpenSSH; missing prerequisites produce the correct
 `apt-get`, `dnf`, or `yum` command before the server is changed.
 
