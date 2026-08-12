@@ -13,7 +13,7 @@ non-interactive and purpose-free.
 Run this single command on a supported server with Git installed:
 
 ```sh
-sh -c 'if ! command -v git >/dev/null 2>&1; then . /etc/os-release 2>/dev/null || :; case "${ID:-}:${ID_LIKE:-}" in debian:*|ubuntu:*|*:*debian*) hint="sudo apt-get install git" ;; fedora:*|rhel:*|centos:*|rocky:*|almalinux:*|ol:*|amzn:*|*:*rhel*|*:*fedora*) if command -v dnf >/dev/null 2>&1; then hint="sudo dnf install git"; else hint="sudo yum install git"; fi ;; *) hint="install Git using your supported package manager" ;; esac; printf "AuthTrail bootstrap requires Git. %s\\n" "$hint" >&2; exit 1; fi; d=$(mktemp -d) || exit 1; trap "rm -rf \"$d\"" EXIT HUP INT TERM; git clone --depth 1 --branch main https://github.com/Harsh-2002/AuthTrail.git "$d" && sudo "$d/bootstrap.sh"' authtrail
+sh -c 'if ! command -v git >/dev/null 2>&1; then . /etc/os-release 2>/dev/null || :; case "${ID:-}:${ID_LIKE:-}" in debian:*|ubuntu:*|*:*debian*) hint="sudo apt-get install git" ;; fedora:*|rhel:*|centos:*|rocky:*|almalinux:*|ol:*|amzn:*|*:*rhel*|*:*fedora*) if command -v dnf >/dev/null 2>&1; then hint="sudo dnf install git"; else hint="sudo yum install git"; fi ;; *) hint="install Git using your supported package manager" ;; esac; printf "AuthTrail bootstrap requires Git. %s\\n" "$hint" >&2; exit 1; fi; d=$(mktemp -d) || exit 1; trap "rm -rf \"$d\"" EXIT HUP INT TERM; git clone --depth 1 --branch main https://github.com/Harsh-2002/AuthTrail.git "$d" && sudo "$d/bootstrap.sh" "$@"' authtrail
 ```
 
 Append `--slack-webhook='https://hooks.slack.com/services/...'` after `authtrail` to enable and
@@ -46,14 +46,3 @@ concise opened/closed session cards and selected security events without blockin
 sudo ./uninstall.sh            # preserve logs and configuration
 sudo ./uninstall.sh --purge    # remove logs and configuration
 ```
-
-## Learn more
-
-- `docs/product.md` — product purpose, scope, experience, and current feature definition
-- `docs/deploy.md` — production deployment, validation, and rollback runbook
-- `docs/contract.md` — non-negotiable product guarantees
-- `docs/development.md` — development conventions, tests, and architecture map
-- `docs/operations.md` — operations and troubleshooting
-- `docs/security.md` — security boundaries and limitations
-- `docs/architecture.md` — event and session design
-- `docs/alloy.md` — optional single-file Grafana Alloy/Loki collection
