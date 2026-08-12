@@ -10,6 +10,8 @@ REPO_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 . "$REPO_DIR/src/install-platform.sh"
 # shellcheck disable=SC1091
 . "$REPO_DIR/src/install-auditd.sh"
+# shellcheck disable=SC1091
+. "$REPO_DIR/src/install-readiness.sh"
 
 PREFIX_SBIN=/usr/local/sbin
 PREFIX_LIB=/usr/local/lib/authtraild
@@ -389,7 +391,10 @@ while ! systemctl is-active authtraild >/dev/null 2>&1; do
     sleep 0.25
 done
 
-"$PREFIX_SBIN/authtrailctl" purpose-status || die 'session-purpose self-test failed'
+if ! wait_for_purpose_runtime "$PREFIX_SBIN/authtrailctl" 120 0.25; then
+    die 'authtraild became active but purpose runtime was not ready within 30 seconds (inspect: journalctl -u authtraild)'
+fi
+"$PREFIX_SBIN/authtrailctl" purpose-status || die 'session-purpose self-test failed after readiness wait'
 
 # --- Optional auditd rules, applied only after the core install is healthy --------
 

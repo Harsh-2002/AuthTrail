@@ -8,6 +8,9 @@ never create, load, or globally reload audit rules, and upgrades/uninstalls remo
 AuthTrail-owned rules. Explicit enablement adds only AuthTrail's tagged rules without globally
 reloading other projects' audit configuration.
 
+Fixed an installer readiness race by waiting up to 30 seconds for the daemon-created purpose
+runtime policy after systemd reports the service active.
+
 ## 1.1.0
 
 Unified persistent events in `events.jsonl`; added mandatory interactive SSH session purpose,

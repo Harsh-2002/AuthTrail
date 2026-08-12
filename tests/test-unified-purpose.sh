@@ -74,6 +74,11 @@ assert_false 'command-like purpose is never executed' test -e /tmp/authtrail-mus
 assert_eq 'recorded event is in canonical log' 'ssh.session.purpose.recorded' "$(tail -n 1 "$AUTH_TRAIL_LOG_DIR/events.jsonl" | jq -r '.event')"
 assert_eq 'environment is present in canonical schema' 'test' "$(tail -n 1 "$AUTH_TRAIL_LOG_DIR/events.jsonl" | jq -r '.environment')"
 
+fixed_close_epoch=2000000000
+epoch_now()
+{
+    printf '%s' "$fixed_close_epoch"
+}
 now=$(epoch_now)
 kv_set "$AUTH_TRAIL_RUN_DIR/sessions/$sid" start_epoch "$((now - 120))"
 kv_set "$AUTH_TRAIL_RUN_DIR/sessions/$sid" access_start_epoch "$((now - 65))"

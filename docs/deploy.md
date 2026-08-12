@@ -73,6 +73,11 @@ The installer must finish with all of the following already complete:
 - Slack enabled and tested when a webhook was supplied;
 - root-only persistent Slack queue created under `/var/lib/authtraild/slack-queue`.
 
+After systemd reports `authtraild` active, the installer waits up to 30 seconds for the daemon's
+purpose runtime policy. A timeout is a real readiness failure and points to
+`journalctl -u authtraild`; a normal scheduling delay must not roll back an otherwise healthy
+installation.
+
 On an upgrade, omission of `--slack-webhook` preserves the existing Slack state. Supplying a new
 webhook atomically replaces the previous Slack configuration. Existing configuration, identity
 labels, legacy category logs, and unrelated

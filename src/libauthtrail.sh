@@ -442,6 +442,14 @@ ensure_log_files()
     chmod 0644 "$AUTH_TRAIL_RUN_DIR/purpose/policy.json" 2>/dev/null || :
 }
 
+purpose_runtime_ready()
+{
+    policy_file="$AUTH_TRAIL_RUN_DIR/purpose/policy.json"
+    [ -d "$AUTH_TRAIL_RUN_DIR/purpose" ] || return 1
+    [ -r "$policy_file" ] || return 1
+    jq -e '.fail_mode == "closed" or .fail_mode == "open"' "$policy_file" >/dev/null 2>&1
+}
+
 ensure_slack_queue()
 {
     mkdir -p "$AUTH_TRAIL_DATA_DIR/slack-queue/pending" \

@@ -413,7 +413,7 @@ cmd_purpose_status()
         printf 'Purpose helper: missing\n'
         fail=1
     fi
-    if [ -d "$AUTH_TRAIL_RUN_DIR/purpose" ]; then
+    if purpose_runtime_ready; then
         printf 'Purpose runtime: ready\n'
     else
         printf 'Purpose runtime: unavailable\n'

@@ -46,6 +46,8 @@ and `security.md`/`architecture.md` for the reasoning.
   sensitive-command alerts reach Slack by default.
 - Unset event fields serialize to JSON `null`, never a placeholder string like `"unknown"`.
 - `install.sh`/`uninstall.sh` never risk locking the operator out of SSH.
+- Installation succeeds only after bounded verification of daemon-created purpose runtime state;
+  systemd's `active` process state alone is not treated as application readiness.
 
 ## Environment assumptions
 
