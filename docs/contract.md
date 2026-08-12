@@ -1,14 +1,14 @@
-# CONTRACT.md
+# Behavioral contract
 
 The behavioral guarantees AuthTrail v1 makes. Any change that violates
-one of these is a regression, not a stylistic choice. See `PRODUCT.md` for the product definition
-and `docs/security.md`/`docs/architecture.md` for the reasoning.
+one of these is a regression, not a stylistic choice. See `product.md` for the product definition
+and `security.md`/`architecture.md` for the reasoning.
 
 ## Never
 
 - Never becomes a Fail2Ban/firewall/IP-blocker, SIEM, IDS/IPS, malware scanner, EDR, database,
   web UI, auth provider, SSH bastion, PAM replacement, or session recorder — the explicit
-  non-goals in `PRODUCT.md`. A feature request that pulls this project
+  non-goals in `product.md`. A feature request that pulls this project
   toward any of those is out of scope for v1, regardless of how useful it sounds.
 - Never blocks SSH authentication, non-interactive SSH, a command after admission, or an account
   switch. The sole exception is the mandatory interactive session-purpose gate: the login shell
@@ -45,7 +45,8 @@ and `docs/security.md`/`docs/architecture.md` for the reasoning.
 
 ## Environment assumptions
 
-- Debian/Ubuntu, systemd, OpenSSH server, bash present; `jq` and `curl` required.
+- Debian/Ubuntu, RHEL-family, or Fedora with systemd, OpenSSH server, Bash, and `jq`; `curl` is
+  required only when Slack is enabled.
 - `authtraild`/`atctl`/`authtrailctl`/`libauthtrail.sh`/`install.sh`/`uninstall.sh` are POSIX `/bin/sh`;
   only `authtrail-bash-hook.sh` and `authtrailctl-completion.bash` are intentionally Bash-specific.
 - `auditd` and `logrotate` are optional — their absence must degrade with a warning, never fail
@@ -53,7 +54,7 @@ and `docs/security.md`/`docs/architecture.md` for the reasoning.
 
 ## Where this is verified
 
-`tests/test-*.sh` cover the individual functions (`make test`). `docs/operations.md`'s "Test
+`tests/test-*.sh` cover the individual functions (`./tests/run.sh`). `operations.md`'s "Test
 results" section records what was verified live against a real host. A change touching the event
 pipeline, session correlation, or the two shell hooks should be checked against a real host, not
-just the unit tests — see `docs/operations.md`'s "Bugs found and fixed" list for why.
+just the unit tests — see `operations.md`'s "Bugs found and fixed" list for why.

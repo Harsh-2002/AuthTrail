@@ -1,12 +1,7 @@
 # Security notes
 
-## What AuthTrail is not
-
-Not a SIEM, IDS, IPS, firewall, Fail2Ban replacement, malware scanner, EDR, PAM replacement, SSH
-bastion, or session-recording tool. It never blocks authentication or non-interactive SSH.
-Interactive shells are intentionally held until mandatory purpose is recorded. Repeated
-authentication failures are detected and reported (locally and, optionally, to Slack) — never
-acted on.
+Product scope and non-goals are defined in [product.md](product.md). This document describes the
+security boundaries and limitations of that scope.
 
 ## Local log integrity
 
@@ -67,4 +62,4 @@ administrator-maintained label in `keys.map` that can be corrected at any time.
 The `sshd_config.d/90-authtraild.conf` drop-in (`LogLevel VERBOSE`, `ExposeAuthInfo yes`) is only
 applied after `sshd -t` validates the resulting configuration. `install.sh`/`uninstall.sh` never
 reload sshd without that check passing first, and restore the previous state if it fails — see
-`docs/operations.md` for the exact failure-mode guarantees.
+`deploy.md` for the installation and rollback procedure.

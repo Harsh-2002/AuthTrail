@@ -4,8 +4,8 @@ AuthTrail does not install or modify Grafana Alloy. The operator-owned Alloy con
 scrape only `/var/log/authtraild/events.jsonl`; journald is an operational view, not the recommended
 Loki source.
 
-The Alloy service needs read access to the `root:adm 0640` event file. Add its service account to
-`adm` or grant an equivalent narrowly-scoped ACL according to local policy.
+The Alloy service needs read access to the root-owned `0640` event file. Grant an equivalent
+narrowly-scoped ACL according to local policy; do not make the log world-readable.
 
 Adapt the final receiver name to the existing Loki pipeline:
 

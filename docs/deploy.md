@@ -1,14 +1,14 @@
 # Deploying AuthTrail to Production
 
-Follow this runbook when installing or upgrading AuthTrail on a Debian/Ubuntu server with systemd
-and OpenSSH.
+Follow this runbook when installing or upgrading AuthTrail on a supported Debian/Ubuntu,
+RHEL-family, or Fedora server with systemd and OpenSSH.
 
 ## Production contract
 
 - Use one installer command. Do not manually copy binaries, edit sshd configuration, run key
   indexing separately, or install packages from inside AuthTrail.
 - AuthTrail never installs dependencies. A failed preflight lists all missing commands and one
-  suggested `apt-get install` command before making changes.
+  suggested platform-appropriate package command before making changes.
 - Keep a separate console/recovery path available while changing SSH infrastructure.
 - Never print, commit, log, or paste a real Slack webhook into tickets or documentation. A webhook
   exposed in terminal history, chat, or logs must be rotated.
@@ -22,23 +22,21 @@ and OpenSSH.
 
 Requirements:
 
-- Debian or Ubuntu with systemd and OpenSSH server
+- Debian/Ubuntu, RHEL-family, or Fedora with systemd and OpenSSH server
 - root/sudo access and an independent recovery path
-- Bash, `jq`, and `curl`
+- Git for the public bootstrap, Bash, and `jq`
+- `curl` only when Slack notifications are enabled
 - outbound HTTPS access to Slack when Slack notifications are enabled
 - optional `auditd` for shell-independent process evidence
 - optional `logrotate` for automatic retention management
 
-From the checked-out AuthTrail directory, run the installer directly. It performs the complete
-preflight before mutation:
+Use the public one-line command in the [README](../README.md#install-from-anywhere). It clones the
+current `main` branch into a temporary directory, runs the same installer, and removes that
+checkout. A local source checkout may run `sudo ./install.sh` directly.
 
-```sh
-sudo ./install.sh
-```
-
-If required software is absent, review the single suggested Debian/Ubuntu install command, install
+If required software is absent, review the suggested `apt-get`, `dnf`, or `yum` command, install
 those packages through the organization's normal change process, and rerun the same command.
-AuthTrail must not invoke `apt`, download packages, or silently weaken a missing requirement.
+AuthTrail must not invoke a package manager or silently weaken a missing requirement.
 
 Before a production rollout, confirm:
 
@@ -51,17 +49,8 @@ Before a production rollout, confirm:
 
 ## 2. Install in one command
 
-Local auditing only:
-
-```sh
-sudo ./install.sh
-```
-
-Local auditing plus Slack:
-
-```sh
-sudo ./install.sh --slack-webhook='https://hooks.slack.com/services/...'
-```
+Use the README command unchanged for local auditing, or append the optional Slack webhook argument
+shown there. The installer validates Slack before it reports success.
 
 The installer must finish with all of the following already complete:
 
@@ -77,6 +66,9 @@ On an upgrade, omission of `--slack-webhook` preserves the existing Slack state.
 webhook validates a real delivery and restores the previous Slack configuration if validation
 fails. Existing configuration, identity labels, legacy category logs, and unrelated
 `PROMPT_COMMAND` hooks must remain intact.
+
+Fresh installations create the canonical log as `root:root`; this portable default avoids relying
+on the Debian-specific `adm` group. Existing administrator-selected log ownership is preserved.
 
 ## 3. Verify before handoff
 
@@ -197,7 +189,7 @@ Monitor:
 - availability of auditd on hosts where shell-independent evidence is required.
 
 Grafana Alloy is operator-managed and must scrape only `events.jsonl`. AuthTrail never installs,
-configures, or restarts Alloy. Follow `docs/alloy.md` and promote only low-cardinality labels.
+configures, or restarts Alloy. Follow `alloy.md` and promote only low-cardinality labels.
 
 ## 6. Failure handling and rollback
 
@@ -232,6 +224,6 @@ justification gate, or editing an administrator-maintained identity label requir
 operator authorization. Never place a real webhook in repository files, command output, test
 fixtures, or documentation.
 
-For implementation changes, run `make test`, preserve POSIX `/bin/sh` boundaries, validate sshd
+For implementation changes, run `./tests/run.sh`, preserve POSIX `/bin/sh` boundaries, validate sshd
 before reload, and perform proportional live SSH regression tests. Record exactly what was tested,
 what was skipped, and any environmental limitation such as unavailable auditd or rsync.

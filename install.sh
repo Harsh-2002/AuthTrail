@@ -6,6 +6,8 @@ umask 022
 
 PROGRAM='install.sh'
 REPO_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck disable=SC1091
+. "$REPO_DIR/src/install-platform.sh"
 
 PREFIX_SBIN=/usr/local/sbin
 PREFIX_LIB=/usr/local/lib/authtraild
@@ -66,42 +68,22 @@ fi
 
 # --- OS / prerequisite detection -------------------------------------------
 
-if [ -r /etc/os-release ]; then
-    # shellcheck disable=SC1091
-    . /etc/os-release
-    case "${ID:-}:${ID_LIKE:-}" in
-        debian:* | ubuntu:* | *:*debian*) ;;
-        *) warn "untested distribution (ID=${ID:-unknown}); proceeding anyway" ;;
-    esac
-else
-    warn '/etc/os-release not found; cannot verify supported distribution'
-fi
+detect_supported_platform || die 'unsupported Linux distribution (supported: Debian/Ubuntu, RHEL-family, Fedora)'
 
-package_for_command()
+report_missing_prerequisites()
 {
-    case "$1" in
-        sshd) printf 'openssh-server' ;;
-        ssh-keygen) printf 'openssh-client' ;;
-        jq) printf 'jq' ;;
-        curl) printf 'curl' ;;
-        bash) printf 'bash' ;;
-        systemctl | journalctl) printf 'systemd' ;;
-        logger) printf 'bsdutils' ;;
-        ps) printf 'procps' ;;
-        hostname) printf 'hostname' ;;
-        find) printf 'findutils' ;;
-        awk) printf 'mawk' ;;
-        sed) printf 'sed' ;;
-        grep) printf 'grep' ;;
-        getent) printf 'libc-bin' ;;
-        *) printf 'coreutils' ;;
-    esac
+    [ -n "$missing_commands" ] || return 0
+    printf '%s: missing required commands: %s\n' "$PROGRAM" "$missing_commands" >&2
+    printf '%s: install the prerequisites, then re-run this same command:\n' "$PROGRAM" >&2
+    printf '    %s %s\n' "$(package_install_command)" "$missing_packages" >&2
+    exit 1
 }
 
 missing_commands=''
 missing_packages=''
-for c in systemctl journalctl sshd ssh-keygen bash jq curl awk sed grep cut tr date \
-    hostname logger ps stat install mktemp od find sort getent tail wc chmod chown readlink ln; do
+for c in systemctl journalctl sshd ssh-keygen bash jq awk sed grep cut tr date \
+    hostname logger ps stat install mktemp od find sort getent tail wc chmod chown readlink ln \
+    cp mv rm sleep dirname id; do
     if ! command -v "$c" >/dev/null 2>&1; then
         missing_commands="${missing_commands}${missing_commands:+ }$c"
         package=$(package_for_command "$c")
@@ -111,12 +93,16 @@ for c in systemctl journalctl sshd ssh-keygen bash jq curl awk sed grep cut tr d
         esac
     fi
 done
+report_missing_prerequisites
 
-if [ -n "$missing_commands" ]; then
-    printf '%s: missing required commands: %s\n' "$PROGRAM" "$missing_commands" >&2
-    printf '%s: install the prerequisites, then re-run this same command:\n' "$PROGRAM" >&2
-    printf '    sudo apt-get install %s\n' "$missing_packages" >&2
-    exit 1
+slack_transport_required=0
+if slack_transport_required "$SLACK_WEBHOOK_SUPPLIED" "$CONF_DIR/authtraild.conf"; then
+    slack_transport_required=1
+fi
+if [ "$slack_transport_required" -eq 1 ] && ! command -v curl >/dev/null 2>&1; then
+    missing_commands='curl'
+    missing_packages=$(package_for_command curl)
+    report_missing_prerequisites
 fi
 
 if [ "$SLACK_WEBHOOK_SUPPLIED" -eq 1 ]; then
@@ -129,7 +115,7 @@ AUDITD_AVAILABLE=0
 if command -v auditctl >/dev/null 2>&1; then
     AUDITD_AVAILABLE=1
 else
-    warn 'auditd/auditctl not found - optional process-execution evidence is inactive (install with: sudo apt-get install auditd)'
+    warn "auditd/auditctl not found - optional process-execution evidence is inactive (install with: $(package_install_command) auditd)"
 fi
 
 LOGROTATE_AVAILABLE=0
@@ -160,7 +146,7 @@ install_template_if_absent()
 # --- Directories -------------------------------------------------------------
 
 install -d -m 0750 -o root -g root "$CONF_DIR"
-install -d -m 0750 -o root -g adm "$LOG_DIR"
+install -d -m 0750 -o root -g root "$LOG_DIR"
 install -d -m 0711 -o root -g root "$RUN_DIR"
 install -d -m 0700 -o root -g root "$DATA_DIR" "$DATA_DIR/slack-queue" \
     "$DATA_DIR/slack-queue/pending" "$DATA_DIR/slack-queue/processing"
@@ -250,7 +236,7 @@ fi
 backup_if_exists "$LOGROTATE_FILE"
 install -m 0644 -o root -g root "$REPO_DIR/logrotate/authtraild" "$LOGROTATE_FILE"
 if [ "$LOGROTATE_AVAILABLE" -eq 0 ]; then
-    warn 'logrotate is not installed - rotation is inactive (install with: sudo apt-get install logrotate)'
+    warn "logrotate is not installed - rotation is inactive (install with: $(package_install_command) logrotate)"
 fi
 
 # --- systemd unit ----------------------------------------------------------------

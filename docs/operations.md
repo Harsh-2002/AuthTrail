@@ -1,62 +1,14 @@
 # Operations
 
-## Install
+## Installation, upgrades, and Slack
 
-```sh
-sudo ./install.sh
-sudo ./install.sh --slack-webhook='https://hooks.slack.com/services/...'
-```
+Use [deploy.md](deploy.md) for the one-line install command, dependency preflight, upgrade
+behavior, Slack activation, validation, rollback, and uninstall. It is the only installation
+procedure. This guide covers commands used after a successful deployment.
 
-The two forms are alternatives: local-only or Slack-enabled. The installer performs a complete
-preflight before changing the host and never installs packages. If required commands are absent,
-it prints all missing commands and one suggested `apt-get install` command, then exits. When the
-preflight passes, no follow-up command or configuration edit is required: keys are indexed,
-configuration is migrated, SSH is validated/reloaded, the service and purpose gate are verified,
-and a supplied Slack webhook is tested.
-
-Requires root, systemd, OpenSSH server, bash, `jq`, `curl`. Idempotent — safe to re-run; binaries
-and units refresh every run, but `authtraild.conf`/`keys.map`/`redact.conf`/
-`sensitive-commands.conf` are left untouched if they already exist, so a customized webhook or
-key registry is never clobbered by a re-install.
-
-Existing command-audit and `PROMPT_COMMAND` mechanisms are preserved. AuthTrail composes with
-both scalar and Bash-array prompt commands, validates `/etc/bash.bashrc`, and restores the prior
-file if the composed configuration is invalid.
-
-`sshd -t` gates every SSH configuration change; if validation fails, the previous configuration
-is restored, sshd is never reloaded, and `install.sh` exits non-zero without applying the
-remaining steps.
-
-## Slack
-
-Pass `--slack-webhook=URL` to `install.sh`. The URL is stored in the root-only configuration,
-Slack is enabled, the service is started with it, and a real test delivery must succeed before
-the installer returns success. The value is never printed, but any secret supplied on a command
-line may be visible in shell history or brief process inspection.
-
-The default `AUTH_TRAIL_SLACK_PROFILE='actionable'` is deliberately low-noise:
-
-- paired opened and closed notifications for a purpose-confirmed interactive session;
-- one aggregated notification when the configured SSH-failure threshold is crossed;
-- privilege transitions; and
-- sensitive-command alerts only when `AUTH_TRAIL_SLACK_COMMAND_ALERTS=1` is explicitly enabled.
-
-The closed card reports time active after justification acceptance and correlates with the opened
-card through the full session ID. It does not send non-interactive/automation lifecycle or individual failed-attempt
-messages. Those facts remain available in `events.jsonl` and Loki. Set the profile to `verbose`
-only when Slack is intentionally being used as a lifecycle feed; the existing per-event switches
-then control starts, ends, individual failures, bursts, privilege changes, and commands.
-
-Payloads omit the environment badge and redundant timestamp, use a concise top-level `text`
-fallback for notifications and screen readers, and use compact
-Block Kit fields for scanability, a plain-text purpose block so user input cannot become Slack
-markup or a mention, and a context footer for session ID/time. Incoming webhooks cannot update
-or delete a prior message, so AuthTrail does not pretend a later logout is an update to the start
-card. Delivery is spooled under `/var/lib/authtraild/slack-queue`, limited to one attempt per
-second, survives daemon restarts, honors HTTP 429 `Retry-After`, and records outcomes in the
-canonical stream. See Slack's official [Block Kit](https://docs.slack.dev/block-kit/) and
-[incoming webhook](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks)
-documentation.
+Check Slack delivery health with `atctl status`. Inspect `slack.delivery.failure` and
+`slack.delivery.dropped` events if the queue is not draining. Notification policy is defined in
+[product.md](product.md); webhook protection is defined in [security.md](security.md).
 
 ## Identity mapping
 
@@ -115,16 +67,6 @@ sudo rm /etc/authtraild/disable-purpose
 
 The marker is intended for console/recovery use. Non-interactive SSH, SCP, SFTP, rsync, and
 automation never enter the purpose gate.
-
-## Uninstall
-
-```sh
-sudo ./uninstall.sh            # stops/disables the service, removes hooks/units/drop-ins, keeps logs + config
-sudo ./uninstall.sh --purge    # also deletes /var/log/authtraild, /etc/authtraild, the logrotate config
-```
-
-Only ever removes the guarded block it added to `/etc/bash.bashrc` and the files it installed —
-never touches an unrelated `PROMPT_COMMAND` or audit mechanism.
 
 ## Known limitations
 
@@ -200,7 +142,7 @@ a forced-PTY session (`ssh -tt`) with paced, piped input to reproduce genuine in
 | Daemon restart mid-session | **Pass** — `/run/authtraild` state is a plain directory, not tied to the daemon's process lifetime, so attribution continues correctly across a restart; only events emitted in the exact stop→start gap are missed (documented, not a misattribution) |
 | Slack delivery (real webhook) | **Pass** — `atctl test-slack` plus live event delivery completed with no `slack.delivery.failure` in `events.jsonl`; actionable mode pairs interactive opened/closed cards and suppresses automation lifecycle noise |
 | Slack disabled by default after testing | **Pass** — reverted to `AUTH_TRAIL_SLACK_ENABLED=0` as shipped |
-| logrotate (`apt-get install` succeeded on this node) | **Pass** — forced rotation produced correctly-owned (`root:adm 0640`) fresh files, old content preserved in `.1`, new events continued landing in the fresh file with no reload needed |
+| logrotate (`apt-get install` succeeded on this node) | **Pass** — forced rotation produced correctly-owned (`root:root 0640`) fresh files, old content preserved in `.1`, new events continued landing in the fresh file with no reload needed |
 | Reboot | **Pass with caveat** — service came back enabled/active with clean `/run` state and logs retained; the LXC runtime's `reboot` did not reset system uptime the way a real host reboot would, so this is a partial validation of true cold-boot behavior |
 | Install idempotency / re-run | **Pass** — customized config files untouched on re-install |
 | Uninstall | **Pass** — SSH remained reachable throughout, logs/config preserved by default, only the guarded `/etc/bash.bashrc` block was removed, `sshd -t` validated before any reload |

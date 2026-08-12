@@ -1,6 +1,6 @@
 # AuthTrail
 
-A lightweight, Linux-native audit trail for SSH access on Debian and Ubuntu. It records who
+A lightweight, Linux-native audit trail for SSH access on supported Linux servers. It records who
 connected, from where, with which key, what they did, account transitions, session purpose, and
 when the session closed — including on shared accounts such as `root`.
 
@@ -8,19 +8,21 @@ It is not a SIEM, firewall, or SSH blocker. Interactive SSH requires a recorded 
 justification; automation such as Ansible, SCP, SFTP, rsync, and remote commands remains
 non-interactive and purpose-free.
 
-## Install
+## Install from anywhere
+
+Run this single command on a supported server with Git installed:
 
 ```sh
-sudo ./install.sh
-sudo ./install.sh --slack-webhook='https://hooks.slack.com/services/...'
+sh -c 'if ! command -v git >/dev/null 2>&1; then . /etc/os-release 2>/dev/null || :; case "${ID:-}:${ID_LIKE:-}" in debian:*|ubuntu:*|*:*debian*) hint="sudo apt-get install git" ;; fedora:*|rhel:*|centos:*|rocky:*|almalinux:*|ol:*|amzn:*|*:*rhel*|*:*fedora*) if command -v dnf >/dev/null 2>&1; then hint="sudo dnf install git"; else hint="sudo yum install git"; fi ;; *) hint="install Git using your supported package manager" ;; esac; printf "AuthTrail bootstrap requires Git. %s\\n" "$hint" >&2; exit 1; fi; d=$(mktemp -d) || exit 1; trap "rm -rf \"$d\"" EXIT HUP INT TERM; git clone --depth 1 --branch main https://github.com/Harsh-2002/AuthTrail.git "$d" && sudo "$d/bootstrap.sh"' authtrail
 ```
 
-The first command enables local auditing; the second also enables and validates Slack. AuthTrail
-never installs packages. If a prerequisite is missing, it reports every missing command and one
-suggested Debian/Ubuntu installation command before changing the server.
+Append `--slack-webhook='https://hooks.slack.com/services/...'` after `authtrail` to enable and
+validate Slack in that same command. AuthTrail never installs packages. It supports Debian/Ubuntu,
+RHEL-family, and Fedora hosts with systemd and OpenSSH; missing prerequisites produce the correct
+`apt-get`, `dnf`, or `yum` command before the server is changed.
 
-Requirements: Debian/Ubuntu, systemd, OpenSSH server, Bash, `jq`, and `curl`. `auditd` and
-`logrotate` are optional.
+Requirements: Git, systemd, OpenSSH server, Bash, and `jq`. `curl` is required only when Slack is
+enabled; `auditd` and `logrotate` are optional.
 
 ## Use
 
@@ -47,8 +49,10 @@ sudo ./uninstall.sh --purge    # remove logs and configuration
 
 ## Learn more
 
-- `PRODUCT.md` — product purpose, scope, experience, and current feature definition
-- `DEPLOY.md` — production deployment, validation, and rollback runbook
+- `docs/product.md` — product purpose, scope, experience, and current feature definition
+- `docs/deploy.md` — production deployment, validation, and rollback runbook
+- `docs/contract.md` — non-negotiable product guarantees
+- `docs/development.md` — development conventions, tests, and architecture map
 - `docs/operations.md` — operations and troubleshooting
 - `docs/security.md` — security boundaries and limitations
 - `docs/architecture.md` — event and session design

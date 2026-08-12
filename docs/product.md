@@ -2,12 +2,13 @@
 
 This document defines what AuthTrail is, who it serves, and the behavior the product must deliver.
 It is the maintained product authority. Technical implementation belongs in
-`docs/architecture.md`; non-negotiable guarantees belong in `CONTRACT.md`; production procedures
-belong in `DEPLOY.md` and `docs/operations.md`.
+`architecture.md`; non-negotiable guarantees belong in `contract.md`; production procedures belong
+in `deploy.md` and `operations.md`.
 
 ## Product purpose
 
-AuthTrail is a lightweight, Linux-native audit service for SSH access on Debian and Ubuntu. It
+AuthTrail is a lightweight, Linux-native audit service for SSH access on Debian/Ubuntu,
+RHEL-family, and Fedora servers. It
 creates a useful answer to five operational questions:
 
 1. Who connected to the server?
@@ -21,13 +22,11 @@ SSH access without deploying a bastion, database, web application, or full SIEM 
 
 ## Product principles
 
-- Installation is one command and requires no follow-up configuration when prerequisites exist:
+- Installation is one command and requires no follow-up configuration when prerequisites exist;
+  the maintained public command is in the [README](../README.md#install-from-anywhere).
 
-  ```sh
-  sudo ./install.sh [--slack-webhook=URL]
-  ```
-
-- The installer checks dependencies but never installs packages or downloads software.
+- The installer checks dependencies but never installs packages. The bootstrap clones the public
+  repository through Git; the installer itself does not download dependencies.
 - Local evidence is authoritative. Slack is a concise notification surface, not a log store.
 - Human output is understandable without `jq`; structured output remains available for automation.
 - Identity follows the SSH key fingerprint through shared accounts and privilege transitions. It is
@@ -39,7 +38,9 @@ SSH access without deploying a bastion, database, web application, or full SIEM 
 
 ## Supported platform and dependencies
 
-The supported baseline is Debian or Ubuntu with systemd, OpenSSH server, Bash, `jq`, and `curl`.
+The supported baseline is Debian/Ubuntu, RHEL-family, or Fedora with systemd, OpenSSH server,
+Bash, and `jq`. Git is required for the public bootstrap command; `curl` is required only when
+Slack is enabled.
 The core shell components use POSIX `/bin/sh`; only interactive Bash command capture and Bash
 completion require Bash syntax. `auditd` and `logrotate` are optional capabilities. Grafana Alloy
 and Loki are operator-managed integrations, not AuthTrail dependencies.
@@ -51,9 +52,10 @@ indexed, completion installed, and the purpose gate ready. Supplying a Slack web
 tests Slack within that same command. Omitting it leaves Slack off on a fresh install and preserves
 the existing Slack state during an upgrade.
 
-Preflight happens before mutation. Missing required commands produce one deduplicated suggested
-Debian/Ubuntu installation command and a nonzero exit. Missing optional capabilities produce clear
-warnings. Existing configuration and administrator-maintained identity labels survive upgrades.
+Preflight happens before mutation. Missing required commands produce one deduplicated
+distribution-specific installation command and a nonzero exit. Missing optional capabilities
+produce clear warnings. Existing configuration and administrator-maintained identity labels survive
+upgrades.
 
 ## Canonical audit data
 
@@ -162,18 +164,18 @@ A production deployment is ready when one installer command completes, `atctl ve
 sshd configuration validates, the service is active, identities are indexed, an interactive test
 records purpose and paired lifecycle evidence, non-interactive regressions bypass the UI, concurrent
 sessions remain isolated, and Slack is healthy when configured. The full procedure and rollback
-requirements are in `DEPLOY.md`.
+requirements are in `deploy.md`.
 
 ## Documentation authority
 
 Read documents in this order when making a change:
 
-1. `AGENTS.md` — repository entry point and required reading order.
-2. `PRODUCT.md` — product intent, scope, and user-visible behavior.
-3. `CONTRACT.md` — invariant guarantees that changes must preserve.
-4. `CLAUDE.md` — implementation conventions, commands, and code map.
-5. `docs/architecture.md` and `docs/security.md` — technical and security reasoning.
-6. `DEPLOY.md` and `docs/operations.md` — production and operational procedures.
+1. Root `CLAUDE.md` (or its `AGENTS.md` symlink) — repository entry point.
+2. `product.md` — product intent, scope, and user-visible behavior.
+3. `contract.md` — invariant guarantees that changes must preserve.
+4. `development.md` — implementation conventions, commands, and code map.
+5. `architecture.md` and `security.md` — technical and security reasoning.
+6. `deploy.md` and `operations.md` — production and operational procedures.
 
 Tests describe verified implementation behavior but do not silently redefine the product. If code,
 tests, and these documents disagree, stop and resolve the inconsistency explicitly.
