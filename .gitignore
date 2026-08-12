@@ -1,0 +1,24 @@
+# macOS and editor metadata
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Local environment and secret files
+.env
+.env.*
+!.env.example
+*.local
+
+# Test and coverage artifacts
+coverage/
+tmp/
+*.tmp
+*.log
+
+# Local package/archive output
+dist/
+*.deb
+*.tar.gz

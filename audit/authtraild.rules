@@ -1,0 +1,5 @@
+# AuthTrail auditd rules fragment (section 18) - only -a watch rules, no -D/-b/-f globals, so it never clobbers other fragments when merged by augenrules.
+# Requires kernel audit access - cannot load inside most containers (see docs/operations.md). arch=b64/b32 are auditctl's own ABI abstraction, safe on any arch.
+
+-a always,exit -F arch=b64 -S execve,execveat -k authtrail-exec
+-a always,exit -F arch=b32 -S execve,execveat -k authtrail-exec

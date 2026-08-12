@@ -1,0 +1,987 @@
+#!/bin/sh
+# authtraild - follows the journal (sshd + our session/command hooks), correlates via $AUTH_TRAIL_RUN_DIR, writes JSONL/journald/Slack. See docs/architecture.md.
+# shellcheck disable=SC2034 # EV_* fields are consumed by build_event_json() in the sourced libauthtrail.sh
+
+set -u
+umask 027
+
+AUTHTRAIL_VERSION='1.2.0'
+
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+if [ -n "${AUTHTRAIL_LIB:-}" ] && [ -f "$AUTHTRAIL_LIB" ]; then
+    : # honor a caller-provided override (tests source this file, where $0 is not authtraild's own path)
+elif [ -f "$SCRIPT_DIR/libauthtrail.sh" ]; then
+    AUTHTRAIL_LIB="$SCRIPT_DIR/libauthtrail.sh"
+elif [ -f "$SCRIPT_DIR/../lib/authtraild/libauthtrail.sh" ]; then
+    AUTHTRAIL_LIB="$SCRIPT_DIR/../lib/authtraild/libauthtrail.sh"
+elif [ -f /usr/local/lib/authtraild/libauthtrail.sh ]; then
+    AUTHTRAIL_LIB=/usr/local/lib/authtraild/libauthtrail.sh
+else
+    printf 'authtraild: cannot locate libauthtrail.sh\n' >&2
+    exit 1
+fi
+# shellcheck disable=SC1090
+. "$AUTHTRAIL_LIB"
+
+jraw()
+{
+    printf '%s' "$1" | jq -r "$2" 2>/dev/null
+}
+
+conn_ip_key()
+{
+    printf '%s' "$AUTH_TRAIL_RUN_DIR/conn/ip_$(printf '%s_%s' "$1" "$2" | tr '/:' '__')"
+}
+
+conn_pid_key()
+{
+    printf '%s' "$AUTH_TRAIL_RUN_DIR/conn/pid_$1"
+}
+
+# sudo -i gets a new pty (Debian's Defaults use_pty) - walk process ancestry via ps until an ancestor's tty matches a known session.
+find_ancestor_tty_key()
+{
+    walk_pid=$1
+    depth=0
+    while [ "$depth" -lt 12 ] && [ -n "$walk_pid" ] && [ "$walk_pid" -gt 1 ] 2>/dev/null; do
+        depth=$((depth + 1))
+        line=$(ps -o ppid=,tty= -p "$walk_pid" 2>/dev/null)
+        [ -n "$line" ] || return 1
+        ppid=$(printf '%s' "$line" | awk '{print $1}')
+        tty_name=$(printf '%s' "$line" | awk '{print $2}')
+        case "$tty_name" in
+            pts/* | tty[0-9]*)
+                ttyk=$(tty_key "/dev/$tty_name")
+                if [ -f "$AUTH_TRAIL_RUN_DIR/tty/$ttyk" ]; then
+                    printf '%s' "$ttyk"
+                    return 0
+                fi
+                ;;
+        esac
+        walk_pid=$ppid
+    done
+    return 1
+}
+
+detect_ssh_unit()
+{
+    if [ -n "$AUTH_TRAIL_SSH_UNIT" ]; then
+        printf '%s' "$AUTH_TRAIL_SSH_UNIT"
+        return 0
+    fi
+    for candidate in ssh.service sshd.service; do
+        if systemctl is-active "$candidate" >/dev/null 2>&1; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    printf '%s' 'ssh.service'
+}
+
+# ---------------------------------------------------------------------------
+# sshd auth-line parsing (section 15) - walks whitespace tokens rather than assuming fixed field positions.
+# ---------------------------------------------------------------------------
+
+parse_sshd_line()
+{
+    msg=$1
+
+    case "$msg" in
+        'Accepted '*' for '*' from '*' port '*'ssh2'*) PARSE_RESULT='success' ;;
+        'Failed '*' for '*' from '*' port '*'ssh2'*) PARSE_RESULT='failure' ;;
+        'Invalid user '*' from '*' port '*) PARSE_RESULT='failure' ;;
+        *) return 1 ;;
+    esac
+
+    # 0x1F not tab: tab is always "IFS whitespace" to `read` and would collapse the empty method field for "Invalid user".
+    sep=$(printf '\037')
+    out=$(printf '%s\n' "$msg" | awk -v SEP="$sep" '
+        {
+            method = ""; user = ""; invalid = 0; ip = ""; port = ""; keyalg = ""; fp = ""
+            if ($1 == "Invalid" && $2 == "user") {
+                invalid = 1
+                user = $3
+                for (i = 1; i <= NF; i++) {
+                    if ($i == "from") { ip = $(i+1) }
+                    else if ($i == "port") { port = $(i+1) }
+                }
+            } else {
+                method = $2
+                for (i = 1; i <= NF; i++) {
+                    if ($i == "for" && user == "") {
+                        if ($(i+1) == "invalid" && $(i+2) == "user") { invalid = 1; user = $(i+3) }
+                        else { user = $(i+1) }
+                    }
+                    else if ($i == "from") { ip = $(i+1) }
+                    else if ($i == "port") { port = $(i+1) }
+                    else if ($i ~ /^SHA256:/) { fp = $i; keyalg = $(i-1) }
+                }
+            }
+            printf "%s%s%s%s%s%s%s%s%s%s%s%s%s\n", method, SEP, invalid, SEP, user, SEP, ip, SEP, port, SEP, keyalg, SEP, fp
+        }
+    ')
+
+    IFS=$(printf '\037') read -r PARSE_METHOD PARSE_INVALID PARSE_USER PARSE_IP PARSE_PORT PARSE_KEYALG PARSE_FP <<PARSE_EOF
+$out
+PARSE_EOF
+
+    [ -n "$PARSE_USER" ] && [ -n "$PARSE_IP" ]
+}
+
+# ---------------------------------------------------------------------------
+# Failure-burst tracking (section 16) - audit only, never blocks anything.
+# ---------------------------------------------------------------------------
+
+record_failure_and_maybe_burst()
+{
+    ip=$1
+    user=$2
+
+    [ "$AUTH_TRAIL_FAILURE_BURST_ENABLED" = '1' ] || return 1
+
+    f="$AUTH_TRAIL_RUN_DIR/failures/$(printf '%s' "$ip" | tr '/:' '__')"
+    now=$(epoch_now)
+
+    first_epoch=$(kv_get "$f" first_epoch)
+    count=$(kv_get "$f" count)
+    cooldown_epoch=$(kv_get "$f" cooldown_epoch)
+    users=$(kv_get "$f" users)
+
+    [ -n "$first_epoch" ] || first_epoch=$now
+    case "$count" in '' | *[!0-9]*) count=0 ;; esac
+    case "$cooldown_epoch" in '' | *[!0-9]*) cooldown_epoch=0 ;; esac
+
+    if [ $((now - first_epoch)) -gt "$AUTH_TRAIL_FAILURE_BURST_WINDOW" ]; then
+        first_epoch=$now
+        count=0
+        users=''
+    fi
+
+    count=$((count + 1))
+
+    case " $users " in
+        *" $user "*) ;;
+        *) users="${users:+$users }$user" ;;
+    esac
+
+    fired=0
+    if [ "$count" -ge "$AUTH_TRAIL_FAILURE_BURST_THRESHOLD" ]; then
+        if [ $((now - cooldown_epoch)) -ge "$AUTH_TRAIL_FAILURE_BURST_COOLDOWN" ]; then
+            fired=1
+            cooldown_epoch=$now
+        fi
+    fi
+
+    atomic_write "$f" "first_epoch=$first_epoch
+count=$count
+cooldown_epoch=$cooldown_epoch
+users=$users"
+
+    if [ "$fired" -eq 1 ]; then
+        BURST_COUNT=$count
+        BURST_USERS=$users
+        return 0
+    fi
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Event handlers
+# ---------------------------------------------------------------------------
+
+handle_session_close()
+{
+    pid=$1
+    closure_source=${2:-unknown}
+    [ -n "$pid" ] || return 0
+
+    pidfile=$(conn_pid_key "$pid")
+    sid=$(kv_get "$pidfile" session_id)
+    [ -n "$sid" ] || return 0
+
+    sfile="$AUTH_TRAIL_RUN_DIR/sessions/$sid"
+    [ -f "$sfile" ] || return 0
+    close_lock="$AUTH_TRAIL_RUN_DIR/closing/$sid"
+    mkdir "$close_lock" 2>/dev/null || return 0
+
+    identity=$(kv_get "$sfile" identity)
+    fp=$(kv_get "$sfile" fingerprint)
+    authm=$(kv_get "$sfile" auth_method)
+    login_user=$(kv_get "$sfile" login_user)
+    source_ip=$(kv_get "$sfile" source_ip)
+    source_port=$(kv_get "$sfile" source_port)
+    tty=$(kv_get "$sfile" tty)
+    purpose=$(kv_get "$sfile" purpose)
+    purpose_state=$(kv_get "$sfile" purpose_state)
+    start_epoch=$(kv_get "$sfile" start_epoch)
+    access_start_epoch=$(session_access_epoch "$sfile")
+    interactive=$(kv_get "$sfile" interactive)
+    end_event_id="${sid}-end"
+
+    existing_event_json=$(jq -Rrc --arg eid "$end_event_id" \
+        'fromjson? | select(.event_id == $eid)' "$AUTH_TRAIL_LOG_DIR/events.jsonl" 2>/dev/null | tail -n 1)
+    if [ -n "$existing_event_json" ]; then
+        if [ "$interactive" = '1' ] && [ "$purpose_state" = 'recorded' ]; then
+            dispatch_slack ssh.session.end "$existing_event_json"
+        fi
+        rm -f "$sfile" "$pidfile"
+        if [ -n "$source_ip" ] && [ -n "$source_port" ]; then
+            rm -f "$(conn_ip_key "$source_ip" "$source_port")"
+        fi
+        if [ -n "$tty" ]; then
+            rm -f "$AUTH_TRAIL_RUN_DIR/tty/$(tty_key "$tty")"
+        fi
+        rmdir "$close_lock" 2>/dev/null || :
+        return 0
+    fi
+
+    send_pending_session_start_slack "$sfile" 1
+
+    current_user=$login_user
+    ttyk=''
+    if [ -n "$tty" ]; then
+        ttyk=$(tty_key "$tty")
+        cu=$(kv_get "$AUTH_TRAIL_RUN_DIR/tty/$ttyk" current_user)
+        [ -n "$cu" ] && current_user=$cu
+    fi
+
+    now=$(epoch_now)
+    duration=0
+    case "$start_epoch" in
+        '' | *[!0-9]*) ;;
+        *) duration=$((now - start_epoch)) ;;
+    esac
+    active_duration=$duration
+    case "$access_start_epoch" in
+        '' | *[!0-9]*) ;;
+        *)
+            active_duration=$((now - access_start_epoch))
+            [ "$active_duration" -ge 0 ] || active_duration=0
+            ;;
+    esac
+
+    EV_EVENT='ssh.session.end'
+    EV_EVENT_ID=$end_event_id
+    EV_SESSION_ID=$sid
+    EV_IDENTITY=$identity
+    EV_FINGERPRINT=$fp
+    EV_AUTH_METHOD=$authm
+    EV_LOGIN_USER=$login_user
+    EV_CURRENT_USER=$current_user
+    EV_TTY=$tty
+    EV_SOURCE_IP=$source_ip
+    EV_SOURCE_PORT=$source_port
+    EV_PURPOSE=$purpose
+    EV_PURPOSE_STATE=$purpose_state
+    [ "$interactive" = '1' ] && EV_INTERACTIVE=true || EV_INTERACTIVE=false
+    if [ "$interactive" != '1' ] || [ "$purpose_state" != 'recorded' ]; then
+        EV_NO_SLACK=1
+    fi
+    EV_EXTRA_JSON=$(jq -nc --arg d "$duration" --arg active "$active_duration" \
+        --arg closure "$closure_source" \
+        '{duration_seconds:($d|tonumber),active_duration_seconds:($active|tonumber),closure_source:$closure}')
+    event_json=$(build_event_json) || {
+        clear_event_vars
+        rmdir "$close_lock" 2>/dev/null || :
+        return 0
+    }
+    if ! write_event "$event_json" 'ssh.session.end'; then
+        clear_event_vars
+        rmdir "$close_lock" 2>/dev/null || :
+        return 0
+    fi
+    if [ "${EV_NO_SLACK:-0}" != '1' ]; then
+        dispatch_slack 'ssh.session.end' "$event_json"
+    fi
+    clear_event_vars
+
+    rm -f "$sfile" "$pidfile"
+    if [ -n "$source_ip" ] && [ -n "$source_port" ]; then
+        rm -f "$(conn_ip_key "$source_ip" "$source_port")"
+    fi
+    [ -n "$ttyk" ] && rm -f "$AUTH_TRAIL_RUN_DIR/tty/$ttyk"
+    rmdir "$close_lock" 2>/dev/null || :
+}
+
+handle_sshd_line()
+{
+    msg=$1
+    pid=$2
+
+    case "$msg" in
+        *'pam_unix(sshd:session): session closed for user '*)
+            handle_session_close "$pid" pam_session_closed
+            return 0
+            ;;
+    esac
+
+    if ! parse_sshd_line "$msg"; then
+        return 0
+    fi
+
+    fp=''
+    keyalg=''
+    if [ "$PARSE_METHOD" = 'publickey' ]; then
+        fp=$PARSE_FP
+        keyalg=$PARSE_KEYALG
+    fi
+
+    identity=''
+    if [ -n "$fp" ]; then
+        identity=$(lookup_identity "$fp")
+    fi
+
+    if [ "$PARSE_RESULT" = 'failure' ]; then
+        EV_EVENT='ssh.auth.failure'
+        EV_LOGIN_USER=$PARSE_USER
+        EV_SOURCE_IP=$PARSE_IP
+        EV_SOURCE_PORT=$PARSE_PORT
+        EV_AUTH_METHOD=$PARSE_METHOD
+        EV_FINGERPRINT=$fp
+        EV_KEY_ALGORITHM=$keyalg
+        EV_PID=$pid
+        EV_SEVERITY='warning'
+        if [ "$PARSE_INVALID" = '1' ]; then
+            EV_EXTRA_JSON='{"invalid_user":true}'
+        fi
+        emit_event >/dev/null
+
+        if record_failure_and_maybe_burst "$PARSE_IP" "$PARSE_USER"; then
+            EV_EVENT='ssh.auth.failure_burst'
+            EV_SOURCE_IP=$PARSE_IP
+            EV_SEVERITY='warning'
+            EV_EXTRA_JSON=$(jq -nc \
+                --arg cnt "$BURST_COUNT" \
+                --arg win "$AUTH_TRAIL_FAILURE_BURST_WINDOW" \
+                --arg users "$BURST_USERS" \
+                '{attempt_count: ($cnt|tonumber),
+                  window_seconds: ($win|tonumber),
+                  attempted_users: (($users|split(" "))|map(select(length>0))),
+                  action: "audit_only"}')
+            emit_event >/dev/null
+        fi
+        return 0
+    fi
+
+    # success
+    sid=$(gen_session_id "$pid")
+    now=$(epoch_now)
+
+    atomic_write "$AUTH_TRAIL_RUN_DIR/sessions/$sid" "session_id=$sid
+identity=$identity
+fingerprint=$fp
+key_algorithm=$keyalg
+auth_method=$PARSE_METHOD
+login_user=$PARSE_USER
+source_ip=$PARSE_IP
+source_port=$PARSE_PORT
+server_ip=
+server_port=
+tty=
+sshd_pid=$pid
+start_epoch=$now
+access_start_epoch=
+interactive=0
+purpose_required=0
+purpose_state=unknown
+purpose=
+purpose_recorded_at=
+login_slack_sent=0"
+
+    if [ -n "$PARSE_IP" ] && [ -n "$PARSE_PORT" ]; then
+        atomic_write "$(conn_ip_key "$PARSE_IP" "$PARSE_PORT")" "session_id=$sid"
+    fi
+    if [ -n "$pid" ]; then
+        atomic_write "$(conn_pid_key "$pid")" "session_id=$sid"
+    fi
+
+    EV_EVENT='ssh.auth.success'
+    EV_SESSION_ID=$sid
+    EV_IDENTITY=$identity
+    EV_FINGERPRINT=$fp
+    EV_KEY_ALGORITHM=$keyalg
+    EV_AUTH_METHOD=$PARSE_METHOD
+    EV_LOGIN_USER=$PARSE_USER
+    EV_SOURCE_IP=$PARSE_IP
+    EV_SOURCE_PORT=$PARSE_PORT
+    EV_PID=$pid
+    emit_event >/dev/null
+
+    EV_EVENT='ssh.session.start'
+    EV_SESSION_ID=$sid
+    EV_IDENTITY=$identity
+    EV_FINGERPRINT=$fp
+    EV_AUTH_METHOD=$PARSE_METHOD
+    EV_LOGIN_USER=$PARSE_USER
+    EV_CURRENT_USER=$PARSE_USER
+    EV_SOURCE_IP=$PARSE_IP
+    EV_SOURCE_PORT=$PARSE_PORT
+    EV_PID=$pid
+    EV_NO_SLACK=1
+    emit_event >/dev/null
+}
+
+# Attaches a TTY to the session already created at auth-success, correlating on the client source_ip:source_port tuple.
+handle_session_init()
+{
+    msg=$1
+
+    h_tty=$(jraw "$msg" '.tty // empty')
+    h_sip=$(jraw "$msg" '.source_ip // empty')
+    h_sport=$(jraw "$msg" '.source_port // empty')
+    h_dip=$(jraw "$msg" '.server_ip // empty')
+    h_dport=$(jraw "$msg" '.server_port // empty')
+    h_user=$(jraw "$msg" '.user // empty')
+
+    [ -n "$h_tty" ] || return 0
+
+    ttyk=$(tty_key "$h_tty")
+    ttyfile="$AUTH_TRAIL_RUN_DIR/tty/$ttyk"
+
+    sid=''
+    if [ -n "$h_sip" ] && [ -n "$h_sport" ]; then
+        sid=$(kv_get "$(conn_ip_key "$h_sip" "$h_sport")" session_id)
+    fi
+
+    if [ -n "$sid" ] && [ -f "$AUTH_TRAIL_RUN_DIR/sessions/$sid" ]; then
+        sfile="$AUTH_TRAIL_RUN_DIR/sessions/$sid"
+        identity=$(kv_get "$sfile" identity)
+        fp=$(kv_get "$sfile" fingerprint)
+        login_user=$(kv_get "$sfile" login_user)
+        kv_set "$sfile" source_ip "$h_sip"
+        kv_set "$sfile" source_port "$h_sport"
+        kv_set "$sfile" server_ip "$h_dip"
+        kv_set "$sfile" server_port "$h_dport"
+        kv_set "$sfile" tty "$h_tty"
+        kv_set "$sfile" interactive 1
+        if [ "$AUTH_TRAIL_PURPOSE_ENABLED" = '1' ] && [ "$AUTH_TRAIL_PURPOSE_REQUIRED" = '1' ]; then
+            current_purpose_state=$(kv_get "$sfile" purpose_state)
+            if [ "$current_purpose_state" != 'recorded' ]; then
+                kv_set "$sfile" purpose_required 1
+                kv_set "$sfile" purpose_state pending
+            fi
+        fi
+
+        atomic_write "$ttyfile" "session_id=$sid
+identity=$identity
+fingerprint=$fp
+login_user=$login_user
+current_user=$login_user
+tty=$h_tty
+last_command="
+        return 0
+    fi
+
+    # Degraded fallback: no matching auth-success record (daemon restarted mid-handshake?) - don't lose the evidence.
+    sid=$(gen_session_id "$$")
+    atomic_write "$AUTH_TRAIL_RUN_DIR/sessions/$sid" "session_id=$sid
+identity=
+fingerprint=
+key_algorithm=
+auth_method=
+login_user=$h_user
+source_ip=$h_sip
+source_port=$h_sport
+server_ip=$h_dip
+server_port=$h_dport
+tty=$h_tty
+sshd_pid=
+start_epoch=$(epoch_now)
+access_start_epoch=
+interactive=1
+purpose_required=$AUTH_TRAIL_PURPOSE_REQUIRED
+purpose_state=pending
+purpose=
+purpose_recorded_at=
+login_slack_sent=0"
+
+    atomic_write "$ttyfile" "session_id=$sid
+identity=
+fingerprint=
+login_user=$h_user
+current_user=$h_user
+tty=$h_tty
+last_command="
+
+    EV_EVENT='ssh.session.start'
+    EV_SESSION_ID=$sid
+    EV_LOGIN_USER=$h_user
+    EV_CURRENT_USER=$h_user
+    EV_TTY=$h_tty
+    EV_SOURCE_IP=$h_sip
+    EV_SOURCE_PORT=$h_sport
+    EV_SERVER_IP=$h_dip
+    EV_SERVER_PORT=$h_dport
+    EV_SEVERITY='warning'
+    EV_NO_SLACK=1
+    emit_event >/dev/null
+}
+
+purpose_response_path()
+{
+    token=$1
+    case "$token" in
+        '' | *[!a-fA-F0-9]*) return 1 ;;
+    esac
+    [ "${#token}" -eq 32 ] || return 1
+    printf '%s/purpose/%s.json' "$AUTH_TRAIL_RUN_DIR" "$token"
+}
+
+write_purpose_response()
+{
+    response_path=$1
+    response_json=$2
+    atomic_write "$response_path" "$response_json" || return 1
+    chmod 0644 "$response_path" 2>/dev/null || :
+}
+
+purpose_set_event_context()
+{
+    p_sfile=$1
+    EV_SESSION_ID=$(kv_get "$p_sfile" session_id)
+    EV_IDENTITY=$(kv_get "$p_sfile" identity)
+    EV_FINGERPRINT=$(kv_get "$p_sfile" fingerprint)
+    EV_AUTH_METHOD=$(kv_get "$p_sfile" auth_method)
+    EV_LOGIN_USER=$(kv_get "$p_sfile" login_user)
+    EV_CURRENT_USER=$EV_LOGIN_USER
+    EV_SOURCE_IP=$(kv_get "$p_sfile" source_ip)
+    EV_SOURCE_PORT=$(kv_get "$p_sfile" source_port)
+    EV_TTY=$(kv_get "$p_sfile" tty)
+    EV_INTERACTIVE=true
+    EV_PURPOSE_REQUIRED=true
+}
+
+handle_purpose_query()
+{
+    msg=$1
+    token=$(jraw "$msg" '.token // empty')
+    response_path=$(purpose_response_path "$token") || return 0
+    p_ip=$(jraw "$msg" '.source_ip // empty')
+    p_port=$(jraw "$msg" '.source_port // empty')
+    p_tty=$(jraw "$msg" '.tty // empty')
+
+    sid=''
+    if [ -n "$p_ip" ] && [ -n "$p_port" ]; then
+        sid=$(kv_get "$(conn_ip_key "$p_ip" "$p_port")" session_id)
+    fi
+    sfile="$AUTH_TRAIL_RUN_DIR/sessions/$sid"
+    if [ -z "$sid" ] || [ ! -f "$sfile" ]; then
+        response=$(jq -nc --arg fail_mode "$AUTH_TRAIL_PURPOSE_FAIL_MODE" \
+            '{status:"error",reason:"session_not_found",fail_mode:$fail_mode}')
+        write_purpose_response "$response_path" "$response"
+        return 0
+    fi
+
+    state=$(kv_get "$sfile" purpose_state)
+    if [ "$AUTH_TRAIL_PURPOSE_ENABLED" != '1' ] || [ -e /etc/authtraild/disable-purpose ]; then
+        kv_set "$sfile" purpose_required 0
+        kv_set "$sfile" purpose_state skipped
+        purpose_set_event_context "$sfile"
+        EV_EVENT='ssh.session.purpose.skipped'
+        EV_PURPOSE_REQUIRED=false
+        EV_REASON='root_disabled'
+        EV_SHELL_ALLOWED=true
+        emit_event >/dev/null
+        response=$(jq -nc --arg sid "$sid" '{status:"skipped",session_id:$sid}')
+        write_purpose_response "$response_path" "$response"
+        return 0
+    fi
+
+    if [ "$state" = 'recorded' ]; then
+        response=$(jq -nc --arg sid "$sid" --arg purpose "$(kv_get "$sfile" purpose)" \
+            '{status:"recorded",session_id:$sid,purpose:$purpose}')
+        write_purpose_response "$response_path" "$response"
+        return 0
+    fi
+
+    kv_set "$sfile" tty "$p_tty"
+    kv_set "$sfile" interactive 1
+    kv_set "$sfile" purpose_required 1
+    kv_set "$sfile" purpose_state pending
+    if [ "$(kv_get "$sfile" purpose_required_event_sent)" != '1' ]; then
+        purpose_set_event_context "$sfile"
+        EV_EVENT='ssh.session.purpose.required'
+        EV_PURPOSE_STATE=pending
+        EV_SHELL_ALLOWED=false
+        emit_event >/dev/null
+        kv_set "$sfile" purpose_required_event_sent 1
+    fi
+
+    response=$(jq -nc \
+        --arg sid "$sid" \
+        --arg hostname "$AUTH_TRAIL_HOSTNAME" \
+        --arg identity "$(kv_get "$sfile" identity)" \
+        --arg account "$(kv_get "$sfile" login_user)" \
+        --arg source "$(kv_get "$sfile" source_ip)" \
+        --arg auth "$(kv_get "$sfile" auth_method)" \
+        --arg min "$AUTH_TRAIL_PURPOSE_MIN_LENGTH" \
+        --arg max "$AUTH_TRAIL_PURPOSE_MAX_LENGTH" \
+        --arg fullscreen "$AUTH_TRAIL_PURPOSE_FULLSCREEN" \
+        --arg clear_after "$AUTH_TRAIL_PURPOSE_CLEAR_AFTER" \
+        --arg fail_mode "$AUTH_TRAIL_PURPOSE_FAIL_MODE" \
+        '{status:"required",session_id:$sid,hostname:$hostname,
+          identity:($identity|select(length>0)//"unmapped"),account:$account,source:$source,
+          auth_method:($auth|select(length>0)//"unknown"),min_length:($min|tonumber),
+          max_length:($max|tonumber),fullscreen:($fullscreen=="1"),
+          clear_after:($clear_after=="1"),fail_mode:$fail_mode}')
+    write_purpose_response "$response_path" "$response"
+}
+
+handle_purpose_submit()
+{
+    msg=$1
+    token=$(jraw "$msg" '.token // empty')
+    response_path=$(purpose_response_path "$token") || return 0
+    [ -f "$response_path" ] || return 0
+    sid=$(jraw "$(cat "$response_path" 2>/dev/null)" '.session_id // empty')
+    sfile="$AUTH_TRAIL_RUN_DIR/sessions/$sid"
+    [ -n "$sid" ] && [ -f "$sfile" ] || return 0
+
+    purpose=$(jraw "$msg" '.purpose // empty')
+    purpose=$(printf '%s' "$purpose" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    purpose_len=$(printf '%s' "$purpose" | wc -m | tr -d ' ')
+    case "$purpose_len" in '' | *[!0-9]*) purpose_len=0 ;; esac
+    if [ "$purpose_len" -lt "$AUTH_TRAIL_PURPOSE_MIN_LENGTH" ] || \
+       [ "$purpose_len" -gt "$AUTH_TRAIL_PURPOSE_MAX_LENGTH" ]; then
+        response=$(jq -nc --arg sid "$sid" '{status:"invalid",reason:"invalid_length",session_id:$sid}')
+        write_purpose_response "$response_path" "$response"
+        return 0
+    fi
+
+    recorded_at=$(iso_timestamp)
+    access_start_epoch=$(epoch_now)
+    kv_set "$sfile" purpose "$purpose" || return 0
+    kv_set "$sfile" purpose_recorded_at "$recorded_at" || return 0
+    kv_set "$sfile" access_start_epoch "$access_start_epoch" || return 0
+    kv_set "$sfile" purpose_state recorded || return 0
+    purpose_set_event_context "$sfile"
+    EV_EVENT='ssh.session.purpose.recorded'
+    EV_PURPOSE=$purpose
+    EV_PURPOSE_STATE=recorded
+    EV_PURPOSE_RECORDED_AT=$recorded_at
+    EV_SHELL_ALLOWED=true
+    event_json=$(build_event_json) || {
+        clear_event_vars
+        return 0
+    }
+    if ! write_event "$event_json" 'ssh.session.purpose.recorded'; then
+        kv_set "$sfile" purpose_state error
+        response=$(jq -nc --arg sid "$sid" '{status:"error",reason:"log_write_failed",session_id:$sid}')
+        write_purpose_response "$response_path" "$response"
+        clear_event_vars
+        return 0
+    fi
+
+    response=$(jq -nc --arg sid "$sid" --arg purpose "$purpose" \
+        '{status:"recorded",session_id:$sid,purpose:$purpose}')
+    write_purpose_response "$response_path" "$response"
+    kv_set "$sfile" login_slack_sent 1
+    clear_event_vars
+    dispatch_slack 'ssh.session.purpose.recorded' "$event_json"
+}
+
+handle_purpose_abort()
+{
+    msg=$1
+    token=$(jraw "$msg" '.token // empty')
+    response_path=$(purpose_response_path "$token") || return 0
+    [ -f "$response_path" ] || return 0
+    sid=$(jraw "$(cat "$response_path" 2>/dev/null)" '.session_id // empty')
+    sfile="$AUTH_TRAIL_RUN_DIR/sessions/$sid"
+    [ -n "$sid" ] && [ -f "$sfile" ] || return 0
+    kv_set "$sfile" purpose_state aborted
+    purpose_set_event_context "$sfile"
+    EV_EVENT='ssh.session.purpose.aborted'
+    EV_PURPOSE_STATE=aborted
+    EV_REASON=$(jraw "$msg" '.reason // "input_aborted"')
+    EV_SHELL_ALLOWED=false
+    emit_event >/dev/null
+}
+
+handle_purpose_event()
+{
+    msg=$1
+    action=$(jraw "$msg" '.action // empty')
+    case "$action" in
+        query) handle_purpose_query "$msg" ;;
+        submit) handle_purpose_submit "$msg" ;;
+        abort) handle_purpose_abort "$msg" ;;
+    esac
+}
+
+# Detects privilege transitions from *observed* current-user change, not from guessing at su/sudo command text (section 19).
+handle_command_event()
+{
+    msg=$1
+
+    fields=$(printf '%s' "$msg" | jq -r '[(.tty//""),(.user//""),(.pid//""),(.exit_code//"")] | join([31]|implode)' 2>/dev/null) || return 0
+    IFS=$(printf '\037') read -r c_tty c_user c_pid c_exit <<CMD_EOF
+$fields
+CMD_EOF
+
+    c_cwd=$(jraw "$msg" '.cwd // empty')
+    c_cmd=$(jraw "$msg" '.command // empty')
+
+    [ -n "$c_tty" ] || return 0
+    [ "$AUTH_TRAIL_COMMAND_CAPTURE" = '1' ] || return 0
+
+    ttyk=$(tty_key "$c_tty")
+    tfile="$AUTH_TRAIL_RUN_DIR/tty/$ttyk"
+
+    if [ ! -f "$tfile" ] && [ -n "$c_pid" ]; then
+        ancestor_ttyk=$(find_ancestor_tty_key "$c_pid")
+        if [ -n "$ancestor_ttyk" ]; then
+            afile="$AUTH_TRAIL_RUN_DIR/tty/$ancestor_ttyk"
+            atomic_write "$tfile" "session_id=$(kv_get "$afile" session_id)
+identity=$(kv_get "$afile" identity)
+fingerprint=$(kv_get "$afile" fingerprint)
+login_user=$(kv_get "$afile" login_user)
+current_user=$(kv_get "$afile" current_user)
+tty=$c_tty
+last_command="
+        fi
+    fi
+
+    sid=''
+    identity=''
+    fp=''
+    login_user=''
+    state_user=''
+    if [ -f "$tfile" ]; then
+        sid=$(kv_get "$tfile" session_id)
+        identity=$(kv_get "$tfile" identity)
+        fp=$(kv_get "$tfile" fingerprint)
+        login_user=$(kv_get "$tfile" login_user)
+        state_user=$(kv_get "$tfile" current_user)
+    fi
+
+    redacted=$(redact_command "$c_cmd")
+    redacted=$(truncate_command "$redacted")
+
+    if [ -n "$state_user" ] && [ -n "$c_user" ] && [ "$state_user" != "$c_user" ]; then
+        prev_cmd=$(kv_get "$tfile" last_command)
+        EV_EVENT='privilege.transition'
+        EV_SESSION_ID=$sid
+        EV_IDENTITY=$identity
+        EV_FINGERPRINT=$fp
+        EV_LOGIN_USER=$login_user
+        EV_FROM_USER=$state_user
+        EV_TO_USER=$c_user
+        EV_COMMAND=$prev_cmd
+        EV_TTY=$c_tty
+        emit_event >/dev/null
+    fi
+
+    effective_user=$c_user
+    [ -n "$effective_user" ] || effective_user=$state_user
+
+    EV_EVENT='command.executed'
+    EV_SESSION_ID=$sid
+    EV_IDENTITY=$identity
+    EV_FINGERPRINT=$fp
+    EV_LOGIN_USER=$login_user
+    EV_CURRENT_USER=$effective_user
+    EV_TTY=$c_tty
+    EV_CWD=$c_cwd
+    EV_COMMAND=$redacted
+    EV_PID=$c_pid
+    EV_EXIT_CODE=$c_exit
+    emit_event >/dev/null
+
+    if [ "$AUTH_TRAIL_SLACK_ENABLED" = '1' ] && [ "$AUTH_TRAIL_SLACK_COMMAND_ALERTS" = '1' ] && is_sensitive_command "$redacted"; then
+        payload=$(build_sensitive_command_slack_payload "$AUTH_TRAIL_HOSTNAME" "$identity" "$effective_user" "$c_tty" "$redacted")
+        alert_id=$(gen_event_id)
+        slack_enqueue command.sensitive "$alert_id" "$sid" "$payload" || :
+    fi
+
+    if [ -f "$tfile" ]; then
+        atomic_write "$tfile" "session_id=$sid
+identity=$identity
+fingerprint=$fp
+login_user=$login_user
+current_user=$effective_user
+tty=$c_tty
+last_command=$redacted"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Main journal-follow loop
+# ---------------------------------------------------------------------------
+
+run_daemon_once()
+{
+    unit=$1
+
+    journalctl -f -o json --no-pager -n 0 2>/dev/null | while IFS= read -r line; do
+        [ -n "$line" ] || continue
+
+        route=$(printf '%s' "$line" | jq -r '[(.SYSLOG_IDENTIFIER//""),(._SYSTEMD_UNIT//""),(._PID//"")] | join([31]|implode)' 2>/dev/null) || continue
+        IFS=$(printf '\037') read -r r_ident r_unit r_pid <<ROUTE_EOF
+$route
+ROUTE_EOF
+
+        case "$r_ident" in
+            authtrail-session)
+                r_msg=$(jraw "$line" '.MESSAGE // empty')
+                handle_session_init "$r_msg"
+                continue
+                ;;
+            authtrail-command)
+                r_msg=$(jraw "$line" '.MESSAGE // empty')
+                handle_command_event "$r_msg"
+                continue
+                ;;
+            authtrail-purpose)
+                r_msg=$(jraw "$line" '.MESSAGE // empty')
+                handle_purpose_event "$r_msg"
+                continue
+                ;;
+        esac
+
+        if [ "$r_unit" = "$unit" ]; then
+            r_msg=$(jraw "$line" '.MESSAGE // empty')
+            handle_sshd_line "$r_msg" "$r_pid"
+        fi
+    done
+}
+
+emit_system_stop()
+{
+    EV_EVENT='system.stop'
+    emit_event >/dev/null
+}
+
+send_pending_session_start_slack()
+{
+    sfile=$1
+    force=${2:-0}
+    [ "$AUTH_TRAIL_SLACK_ENABLED" = '1' ] || return 0
+    [ "$AUTH_TRAIL_SLACK_PROFILE" = 'verbose' ] || return 0
+    [ "$AUTH_TRAIL_SLACK_LOGIN" = '1' ] || return 0
+    [ "$(kv_get "$sfile" login_slack_sent)" = '0' ] || return 0
+    [ "$(kv_get "$sfile" purpose_state)" = 'unknown' ] || return 0
+    start_epoch=$(kv_get "$sfile" start_epoch)
+    case "$start_epoch" in '' | *[!0-9]*) return 0 ;; esac
+    now=$(epoch_now)
+    if [ "$force" != '1' ]; then
+        [ $((now - start_epoch)) -ge 3 ] || return 0
+    fi
+
+    kv_set "$sfile" login_slack_sent 1
+    event_json=$(jq -nc \
+        --arg hostname "$AUTH_TRAIL_HOSTNAME" \
+        --arg environment "$AUTH_TRAIL_ENVIRONMENT" \
+        --arg sid "$(kv_get "$sfile" session_id)" \
+        --arg identity "$(kv_get "$sfile" identity)" \
+        --arg login_user "$(kv_get "$sfile" login_user)" \
+        --arg source_ip "$(kv_get "$sfile" source_ip)" \
+        --arg auth_method "$(kv_get "$sfile" auth_method)" \
+        --arg fp "$(kv_get "$sfile" fingerprint)" \
+        --arg timestamp "$(iso_timestamp)" \
+        '{hostname:$hostname,environment:$environment,session_id:$sid,identity:($identity|select(length>0)//"unmapped"),
+          login_user:$login_user,source_ip:$source_ip,auth_method:$auth_method,
+          key_fingerprint:($fp|select(length>0)//null),timestamp:$timestamp,tty:null}')
+    payload=$(build_login_slack_payload "$event_json") || return 0
+    pending_id=$(gen_event_id)
+    slack_enqueue ssh.session.start "$pending_id" "$(kv_get "$sfile" session_id)" "$payload" || :
+}
+
+# Safety net for when sshd never logs "session closed" (observed under LXC - see docs/operations.md).
+reap_stale_sessions()
+{
+    if [ -d "$AUTH_TRAIL_RUN_DIR/sessions" ]; then
+        for f in "$AUTH_TRAIL_RUN_DIR"/sessions/*; do
+            [ -e "$f" ] || continue
+            send_pending_session_start_slack "$f"
+            sshd_pid=$(kv_get "$f" sshd_pid)
+            [ -n "$sshd_pid" ] || continue
+            if kill -0 "$sshd_pid" 2>/dev/null; then
+                if [ -n "$(kv_get "$f" dead_seen_epoch)" ]; then
+                    kv_set "$f" dead_seen_epoch ''
+                fi
+            else
+                dead_seen_epoch=$(kv_get "$f" dead_seen_epoch)
+                now=$(epoch_now)
+                case "$dead_seen_epoch" in
+                    '' | *[!0-9]*) kv_set "$f" dead_seen_epoch "$now" ;;
+                    *)
+                        if [ $((now - dead_seen_epoch)) -ge 5 ]; then
+                            handle_session_close "$sshd_pid" sshd_process_reaped
+                        fi
+                        ;;
+                esac
+            fi
+        done
+    fi
+
+    if [ -d "$AUTH_TRAIL_RUN_DIR/purpose" ]; then
+        find "$AUTH_TRAIL_RUN_DIR/purpose" -type f ! -name policy.json -mmin +10 -exec rm -f {} \; 2>/dev/null || :
+    fi
+
+    # Also sweep orphaned tty entries (e.g. one adopted via find_ancestor_tty_key for a sudo -i pty).
+    if [ -d "$AUTH_TRAIL_RUN_DIR/tty" ]; then
+        for f in "$AUTH_TRAIL_RUN_DIR"/tty/*; do
+            [ -e "$f" ] || continue
+            sid=$(kv_get "$f" session_id)
+            if [ -z "$sid" ] || [ ! -f "$AUTH_TRAIL_RUN_DIR/sessions/$sid" ]; then
+                rm -f "$f"
+            fi
+        done
+    fi
+}
+
+cmd_run()
+{
+    ensure_log_files
+    recover_slack_queue
+    find "$AUTH_TRAIL_RUN_DIR/closing" -mindepth 1 -maxdepth 1 -type d -exec rmdir {} \; 2>/dev/null || :
+    unit=$(detect_ssh_unit)
+    log_stderr "starting; following unit=$unit log_dir=$AUTH_TRAIL_LOG_DIR run_dir=$AUTH_TRAIL_RUN_DIR"
+
+    # EXIT alone emits system.stop once; TERM/INT/HUP just exit 0 into that trap (avoids double-firing).
+    trap 'kill "$reaper_pid" 2>/dev/null; emit_system_stop' EXIT
+    trap 'exit 0' HUP INT TERM
+
+    EV_EVENT='system.start'
+    EV_EXTRA_JSON=$(jq -nc --arg v "$AUTHTRAIL_VERSION" '{version: $v}')
+    emit_event >/dev/null
+
+    (
+        while :; do
+            sleep 1
+            process_slack_queue_once
+            reap_stale_sessions
+        done
+    ) &
+    reaper_pid=$!
+
+    while :; do
+        run_daemon_once "$unit"
+        log_stderr 'journal follower ended, restarting in 2s'
+        sleep 2
+    done
+}
+
+main()
+{
+    load_config
+    require_runtime
+
+    sub=${1:-}
+    [ $# -gt 0 ] && shift
+
+    case "$sub" in
+        run) cmd_run "$@" ;;
+        version) printf 'authtraild %s\n' "$AUTHTRAIL_VERSION" ;;
+        *)
+            printf 'usage: authtraild {run|version}\n' >&2
+            exit 2
+            ;;
+    esac
+}
+
+# Guard so tests/ can source this file for its functions without running the daemon.
+if [ "${AUTHTRAIL_SELFTEST:-0}" != '1' ]; then
+    main "$@"
+fi

@@ -1,0 +1,22 @@
+[Unit]
+Description=AuthTrail SSH access and user activity audit daemon
+After=systemd-journald.service ssh.service
+Wants=systemd-journald.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/authtraild run
+Restart=on-failure
+RestartSec=2
+User=root
+Group=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/run/authtraild /var/log/authtraild /var/lib/authtraild
+ReadOnlyPaths=/etc/authtraild
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

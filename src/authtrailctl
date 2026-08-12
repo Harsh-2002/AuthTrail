@@ -1,0 +1,551 @@
+#!/bin/sh
+# authtrailctl - AuthTrail operator CLI: status, tests, key indexing, session/event inspection (section 31).
+
+set -u
+umask 027
+PROGRAM=${0##*/}
+
+AUTHTRAIL_VERSION='1.2.0'
+
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+if [ -n "${AUTHTRAIL_LIB:-}" ] && [ -f "$AUTHTRAIL_LIB" ]; then
+    : # honor a caller-provided override (tests source this file, where $0 is not authtrailctl's own path)
+elif [ -f "$SCRIPT_DIR/libauthtrail.sh" ]; then
+    AUTHTRAIL_LIB="$SCRIPT_DIR/libauthtrail.sh"
+elif [ -f "$SCRIPT_DIR/../lib/authtraild/libauthtrail.sh" ]; then
+    AUTHTRAIL_LIB="$SCRIPT_DIR/../lib/authtraild/libauthtrail.sh"
+elif [ -f /usr/local/lib/authtraild/libauthtrail.sh ]; then
+    AUTHTRAIL_LIB=/usr/local/lib/authtraild/libauthtrail.sh
+else
+    printf 'authtrailctl: cannot locate libauthtrail.sh\n' >&2
+    exit 1
+fi
+# shellcheck disable=SC1090
+. "$AUTHTRAIL_LIB"
+
+event_human_filter='def d:
+  if . == null then "-" else tostring end;
+def detail:
+  if .event == "ssh.auth.success" then "authenticated " + ((.identity // "unmapped")|d) + " as " + ((.login_user // "?")|d) + " from " + ((.source_ip // "?")|d)
+  elif .event == "ssh.auth.failure" then "failed login for " + ((.login_user // "?")|d) + " from " + ((.source_ip // "?")|d)
+  elif .event == "ssh.auth.failure_burst" then ((.attempt_count // 0)|tostring) + " failures from " + ((.source_ip // "?")|d)
+  elif .event == "ssh.session.start" then "session opened for " + ((.identity // "unmapped")|d)
+  elif .event == "ssh.session.end" then "session closed after " + ((.active_duration_seconds // .duration_seconds // 0)|tostring) + "s"
+  elif .event == "ssh.session.purpose.recorded" then "justification accepted: " + ((.purpose // "")|d)
+  elif (.event | startswith("ssh.session.purpose.")) then ((.purpose_state // .reason // "")|d)
+  elif .event == "command.executed" then ((.current_user // .login_user // "?")|d) + "$ " + ((.command // "")|d) + " [" + ((.exit_code // "?")|d) + "]"
+  elif .event == "audit.exec" then "exec " + ((.command // "")|d)
+  elif .event == "privilege.transition" then ((.from_user // "?")|d) + " -> " + ((.to_user // "?")|d) + " via " + ((.command // "unknown")|d)
+  elif (.event | startswith("slack.delivery.")) then ((.original_event // "unknown")|d) + " " + ((.reason // "")|d)
+  else ((.reason // "")|d) end;
+(.timestamp // "unknown") + "  " + (.event // "unknown") + "  " + detail'
+
+collect_events()
+{
+    file=$1
+    filter=$2
+    n=$3
+    if [ ! -f "$file" ]; then
+        return 0
+    fi
+    if [ "$filter" = '.' ]; then
+        tail -n "$n" "$file" | jq -Rrc 'fromjson?'
+    else
+        jq -Rrc "fromjson? | select($filter)" "$file" 2>/dev/null | tail -n "$n"
+    fi
+}
+
+# Compatibility helpers retained for sourced tests and scripts from v1.1.
+tail_jsonl()
+{
+    collect_events "$1" '.' "$2"
+}
+
+tail_events_matching()
+{
+    collect_events "$AUTH_TRAIL_LOG_DIR/events.jsonl" "$1" "$2"
+}
+
+cmd_recent_view()
+{
+    filter=$1
+    shift
+    mode=human
+    n=20
+    for arg in "$@"; do
+        case "$arg" in
+            --json) mode=json ;;
+            --jsonl) mode=jsonl ;;
+            '' | *[!0-9]*) die "usage: $PROGRAM recent command [--json|--jsonl] [N]" ;;
+            *) n=$arg ;;
+        esac
+    done
+    file="$AUTH_TRAIL_LOG_DIR/events.jsonl"
+    if [ ! -f "$file" ]; then
+        printf 'no events yet (%s does not exist)\n' "$file"
+        return 0
+    fi
+    events=$(collect_events "$file" "$filter" "$n")
+    case "$mode" in
+        json) printf '%s\n' "$events" | jq -s '.' ;;
+        jsonl) printf '%s\n' "$events" ;;
+        human) printf '%s\n' "$events" | jq -r "$event_human_filter" ;;
+    esac
+}
+
+cmd_status()
+{
+    if [ "$AUTH_TRAIL_ENABLED" = '1' ]; then
+        printf 'AuthTrail: enabled\n'
+    else
+        printf 'AuthTrail: disabled\n'
+    fi
+
+    svc_state='unknown'
+    if have_cmd systemctl; then
+        svc_state=$(systemctl is-active authtraild 2>/dev/null || printf 'inactive')
+    fi
+    printf 'Service: %s\n' "$svc_state"
+
+    if [ -f /etc/ssh/sshd_config.d/90-authtraild.conf ]; then
+        printf 'SSH integration: enabled\n'
+    else
+        printf 'SSH integration: not installed\n'
+    fi
+
+    if [ "$AUTH_TRAIL_AUDITD_ENABLED" = '1' ] && have_cmd auditctl; then
+        printf 'auditd integration: enabled\n'
+    elif [ "$AUTH_TRAIL_AUDITD_ENABLED" = '1' ]; then
+        printf 'auditd integration: configured but auditctl unavailable on this host\n'
+    else
+        printf 'auditd integration: disabled\n'
+    fi
+
+    if grep -q 'authtrail-bash-hook.sh' /etc/bash.bashrc 2>/dev/null; then
+        printf 'Command hook: enabled\n'
+    else
+        printf 'Command hook: not installed\n'
+    fi
+
+    if [ "$AUTH_TRAIL_SLACK_ENABLED" = '1' ]; then
+        if [ -n "$AUTH_TRAIL_SLACK_WEBHOOK_URL" ]; then
+            printf 'Slack: enabled (webhook configured, %s profile)\n' "$AUTH_TRAIL_SLACK_PROFILE"
+        else
+            printf 'Slack: enabled (webhook NOT configured)\n'
+        fi
+    else
+        printf 'Slack: disabled\n'
+    fi
+    queue_depth=$(slack_queue_depth)
+    queue_age=$(slack_queue_oldest_age)
+    if [ "$queue_depth" -gt 0 ]; then
+        printf 'Slack queue: %s pending (oldest %s)\n' "$queue_depth" "$(format_duration "$queue_age")"
+    else
+        printf 'Slack queue: empty\n'
+    fi
+    if [ -f "$AUTH_TRAIL_LOG_DIR/events.jsonl" ]; then
+        last_delivery=$(jq -Rr 'fromjson? | select((.event? // "") | startswith("slack.delivery.")) | [.event,(.reason // "")] | @tsv' \
+            "$AUTH_TRAIL_LOG_DIR/events.jsonl" 2>/dev/null | tail -n 1)
+        [ -z "$last_delivery" ] || printf 'Last Slack delivery: %s\n' "$last_delivery"
+    fi
+
+    printf 'Log directory: %s\n' "$AUTH_TRAIL_LOG_DIR"
+    printf 'Canonical event log: %s/events.jsonl\n' "$AUTH_TRAIL_LOG_DIR"
+
+    if [ "$AUTH_TRAIL_PURPOSE_ENABLED" = '1' ]; then
+        printf 'Session purpose: enabled (%s)\n' "$AUTH_TRAIL_PURPOSE_FAIL_MODE"
+    else
+        printf 'Session purpose: disabled\n'
+    fi
+
+    key_count=0
+    if [ -f "$AUTH_TRAIL_KEY_MAP" ]; then
+        key_count=$(grep -v '^#' "$AUTH_TRAIL_KEY_MAP" 2>/dev/null | grep -c '|')
+    fi
+    printf 'Key identities: %s\n' "$key_count"
+}
+
+cmd_verify()
+{
+    fail=0
+
+    check()
+    {
+        label=$1
+        shift
+        if "$@" >/dev/null 2>&1; then
+            printf '[ OK ] %s\n' "$label"
+        else
+            printf '[FAIL] %s\n' "$label"
+            fail=1
+        fi
+    }
+
+    check 'config file ownership/mode (root:root, 0600/0400)' config_owner_and_mode_ok "$CONFIG_FILE"
+    check 'required runtime commands present' require_runtime
+    check 'log directory exists' [ -d "$AUTH_TRAIL_LOG_DIR" ]
+    check 'run directory exists' [ -d "$AUTH_TRAIL_RUN_DIR" ]
+    check 'key map file readable' [ -r "$AUTH_TRAIL_KEY_MAP" ]
+    check 'sensitive-commands file readable' [ -r "$AUTH_TRAIL_SENSITIVE_COMMANDS" ]
+    check 'redact file readable' [ -r "$AUTH_TRAIL_REDACT_FILE" ]
+    check 'jq can parse a sample event' jq -e . <<'JSON'
+{"schema_version":1,"event":"system.start"}
+JSON
+
+    if [ "$AUTH_TRAIL_SLACK_ENABLED" = '1' ]; then
+        check 'Slack webhook configured' [ -n "$AUTH_TRAIL_SLACK_WEBHOOK_URL" ]
+        check 'Slack queue directory is private' [ "$(stat -c '%a' "$AUTH_TRAIL_DATA_DIR/slack-queue" 2>/dev/null)" = '700' ]
+        check 'Slack queue directory is root-owned' [ "$(stat -c '%U' "$AUTH_TRAIL_DATA_DIR/slack-queue" 2>/dev/null)" = 'root' ]
+    fi
+
+    if [ "$fail" -eq 0 ]; then
+        printf 'authtrailctl verify: all checks passed\n'
+    else
+        printf 'authtrailctl verify: one or more checks failed\n' >&2
+    fi
+
+    return "$fail"
+}
+
+cmd_test()
+{
+    cmd_verify
+    verify_status=$?
+
+    tmp="$AUTH_TRAIL_LOG_DIR/.authtrailctl-test.$$"
+    if printf 'test\n' >"$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        printf '[ OK ] log directory is writable\n'
+    else
+        printf '[FAIL] log directory is not writable: %s\n' "$AUTH_TRAIL_LOG_DIR"
+        verify_status=1
+    fi
+
+    if have_cmd systemctl && systemctl is-active authtraild >/dev/null 2>&1; then
+        printf '[ OK ] authtraild service is active\n'
+    else
+        printf '[WARN] authtraild service is not active (this is fine if you are testing before install)\n'
+    fi
+
+    return "$verify_status"
+}
+
+cmd_test_slack()
+{
+    if [ -z "$AUTH_TRAIL_SLACK_WEBHOOK_URL" ]; then
+        die 'AUTH_TRAIL_SLACK_WEBHOOK_URL is not configured in '"$CONFIG_FILE"
+    fi
+
+    payload=$(jq -nc --arg hostname "$AUTH_TRAIL_HOSTNAME" --arg profile "$AUTH_TRAIL_SLACK_PROFILE" \
+        '{text: ("AuthTrail Slack check passed for " + $hostname), blocks: [
+            {type:"section", text:{type:"mrkdwn", text:"*:white_check_mark: AuthTrail Slack check passed*"}},
+            {type:"section", fields:[
+                {type:"mrkdwn", text:("*Server*\n`" + $hostname + "`")},
+                {type:"mrkdwn", text:("*Delivery profile*\n`" + $profile + "`")}
+            ]}
+        ]}')
+
+    # Process-local override so an operator can test a webhook before flipping the real config flag.
+    AUTH_TRAIL_SLACK_ENABLED=1
+    if slack_post "$payload"; then
+        printf 'Slack test message sent successfully.\n'
+    else
+        printf 'Slack test message failed - see slack.delivery.failure events in %s/events.jsonl\n' "$AUTH_TRAIL_LOG_DIR" >&2
+        exit 1
+    fi
+}
+
+cmd_index_keys()
+{
+    tmp=$(mktemp) || die 'cannot create temp file'
+    trap 'rm -f "$tmp" "${tmp}.new"' EXIT HUP INT TERM
+
+    if [ -f "$AUTH_TRAIL_KEY_MAP" ]; then
+        grep -v '^#' "$AUTH_TRAIL_KEY_MAP" 2>/dev/null | grep -v '^[[:space:]]*$' >"$tmp" || :
+    fi
+
+    getent passwd | while IFS=: read -r pname _ _ _ _ phome _; do
+        for akf in "$phome/.ssh/authorized_keys" "$phome/.ssh/authorized_keys2"; do
+            [ -f "$akf" ] || continue
+            while IFS= read -r keyline; do
+                case "$keyline" in
+                    '' | '#'*) continue ;;
+                esac
+
+                fp=$(printf '%s\n' "$keyline" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}')
+                [ -n "$fp" ] || continue
+
+                comment=$(printf '%s\n' "$keyline" | awk '
+                    { if (NF >= 3) {
+                        line = ""
+                        for (i = 3; i <= NF; i++) line = line (line == "" ? "" : " ") $i
+                        print line
+                    } }')
+                [ -n "$comment" ] || comment="unlabeled-key-${pname}"
+
+                if ! grep -q "^${fp}|" "$tmp" 2>/dev/null; then
+                    printf '%s|%s\n' "$fp" "$comment" >>"$tmp"
+                fi
+            done <"$akf"
+        done
+    done
+
+    {
+        printf '# AuthTrail key registry - regenerated by "authtrailctl index-keys" on %s\n' "$(iso_timestamp)"
+        printf '# fingerprint|identity - edit the identity column to correct/override.\n'
+        printf '# Comments are read from authorized_keys but are NOT cryptographically\n'
+        printf '# trustworthy; the fingerprint is authoritative. Lines with leading\n'
+        printf '# authorized_keys options (command=,no-agent-forwarding,...) are not\n'
+        printf '# specially parsed and may need manual correction.\n'
+        sort -u "$tmp"
+    } >"${tmp}.new"
+
+    install -m 0644 -o root -g root "${tmp}.new" "$AUTH_TRAIL_KEY_MAP"
+
+    n=$(grep -v '^#' "$AUTH_TRAIL_KEY_MAP" 2>/dev/null | grep -c '|' || printf 0)
+    printf 'Indexed %s key(s) into %s\n' "$n" "$AUTH_TRAIL_KEY_MAP"
+}
+
+cmd_sessions()
+{
+    if [ ! -d "$AUTH_TRAIL_RUN_DIR/sessions" ]; then
+        printf 'no active sessions\n'
+        return 0
+    fi
+
+    found=0
+    printf '%-40s %-28s %-10s %-10s %-15s %-12s\n' 'SESSION' 'IDENTITY' 'LOGIN' 'CURRENT' 'SOURCE' 'ACTIVE'
+
+    for f in "$AUTH_TRAIL_RUN_DIR"/sessions/*; do
+        [ -e "$f" ] || continue
+        found=1
+
+        sid=$(kv_get "$f" session_id)
+        identity=$(kv_get "$f" identity)
+        [ -n "$identity" ] || identity='unmapped'
+        login_user=$(kv_get "$f" login_user)
+        source_ip=$(kv_get "$f" source_ip)
+        tty=$(kv_get "$f" tty)
+        access_start=$(session_access_epoch "$f")
+        case "$access_start" in
+            '' | *[!0-9]*) active_for='pending' ;;
+            *) active_for=$(format_duration "$(($(epoch_now) - access_start))") ;;
+        esac
+
+        current_user=$login_user
+        if [ -n "$tty" ]; then
+            ttyk=$(tty_key "$tty")
+            cu=$(kv_get "$AUTH_TRAIL_RUN_DIR/tty/$ttyk" current_user)
+            [ -n "$cu" ] && current_user=$cu
+        fi
+
+        printf '%-40s %-28s %-10s %-10s %-15s %-12s\n' "$sid" "$identity" "${login_user:--}" "${current_user:--}" "${source_ip:--}" "$active_for"
+    done
+
+    [ "$found" -eq 1 ] || printf 'no active sessions\n'
+}
+
+cmd_purpose_status()
+{
+    fail=0
+    if [ "$AUTH_TRAIL_PURPOSE_ENABLED" = '1' ]; then
+        printf 'Purpose gate: enabled\n'
+    else
+        printf 'Purpose gate: disabled by configuration\n'
+    fi
+    printf 'Required: %s\n' "$AUTH_TRAIL_PURPOSE_REQUIRED"
+    printf 'Failure mode: %s\n' "$AUTH_TRAIL_PURPOSE_FAIL_MODE"
+    printf 'Length: %s-%s characters\n' "$AUTH_TRAIL_PURPOSE_MIN_LENGTH" "$AUTH_TRAIL_PURPOSE_MAX_LENGTH"
+    if [ -e /etc/authtraild/disable-purpose ]; then
+        printf 'Emergency disable marker: present\n'
+    else
+        printf 'Emergency disable marker: absent\n'
+    fi
+    if [ -x /usr/local/lib/authtraild/authtrail-purpose.sh ]; then
+        printf 'Purpose helper: installed\n'
+    else
+        printf 'Purpose helper: missing\n'
+        fail=1
+    fi
+    if [ -d "$AUTH_TRAIL_RUN_DIR/purpose" ]; then
+        printf 'Purpose runtime: ready\n'
+    else
+        printf 'Purpose runtime: unavailable\n'
+        fail=1
+    fi
+    return "$fail"
+}
+
+build_session_json()
+{
+    sid=$1
+    sfile="$AUTH_TRAIL_RUN_DIR/sessions/$sid"
+    active=false
+    current_user=''
+    runtime_purpose=''
+    runtime_access_start=''
+    if [ -f "$sfile" ]; then
+        active=true
+        current_user=$(kv_get "$sfile" login_user)
+        tty=$(kv_get "$sfile" tty)
+        if [ -n "$tty" ]; then
+            ttyk=$(tty_key "$tty")
+            state_user=$(kv_get "$AUTH_TRAIL_RUN_DIR/tty/$ttyk" current_user)
+            [ -z "$state_user" ] || current_user=$state_user
+        fi
+        runtime_purpose=$(kv_get "$sfile" purpose)
+        runtime_access_start=$(session_access_epoch "$sfile")
+    fi
+
+    active_now=''
+    case "$runtime_access_start" in
+        '' | *[!0-9]*) ;;
+        *) active_now=$(($(epoch_now) - runtime_access_start)) ;;
+    esac
+
+    event_file="$AUTH_TRAIL_LOG_DIR/events.jsonl"
+    [ -f "$event_file" ] || event_file=/dev/null
+
+    jq -Rsc --arg sid "$sid" --argjson active "$active" \
+        --arg current_user "$current_user" --arg runtime_purpose "$runtime_purpose" \
+        --arg active_now "$active_now" '
+        [split("\n")[] | fromjson? | select(.session_id == $sid)] as $events
+        | {
+            session_id: $sid,
+            active: $active,
+            identity: ($events | map(.identity // empty) | map(select(length>0)) | first // null),
+            login_user: ($events | map(.login_user // empty) | map(select(length>0)) | first // null),
+            current_user: (if $current_user == "" then
+                ($events | map(.current_user // empty) | map(select(length>0)) | last // null)
+              else $current_user end),
+            source_ip: ($events | map(.source_ip // empty) | map(select(length>0)) | first // null),
+            hostname: ($events | map(.hostname // empty) | map(select(length>0)) | first // null),
+            auth_method: ($events | map(.auth_method // empty) | map(select(length>0)) | first // null),
+            purpose: (if $runtime_purpose == "" then
+                ($events | map(.purpose // empty) | map(select(length>0)) | last // null)
+              else $runtime_purpose end),
+            started_at: ($events | map(select(.event == "ssh.session.start") | .timestamp) | first // null),
+            access_started_at: ($events | map(select(.event == "ssh.session.purpose.recorded") | .timestamp) | last // null),
+            closed_at: ($events | map(select(.event == "ssh.session.end") | .timestamp) | last // null),
+            active_duration_seconds: (if $active_now != "" then ($active_now|tonumber) else
+              ($events | map(select(.event == "ssh.session.end") | .active_duration_seconds) | last // null) end),
+            duration_seconds: ($events | map(select(.event == "ssh.session.end") | .duration_seconds) | last // null),
+            closure_source: ($events | map(select(.event == "ssh.session.end") | .closure_source) | last // null),
+            events: $events
+          }' "$event_file"
+}
+
+cmd_session()
+{
+    mode=human
+    sid=''
+    for arg in "$@"; do
+        case "$arg" in
+            --json) mode=json ;;
+            --jsonl) die "$PROGRAM session supports --json; --jsonl is for recent event streams" ;;
+            -*) die "usage: $PROGRAM session [--json] <session-id>" ;;
+            *) [ -z "$sid" ] || die "usage: $PROGRAM session [--json] <session-id>"; sid=$arg ;;
+        esac
+    done
+    if [ -z "$sid" ]; then
+        cmd_sessions
+        return 0
+    fi
+    session_json=$(build_session_json "$sid") || return 1
+    if [ "$mode" = json ]; then
+        printf '%s\n' "$session_json" | jq '.'
+        return 0
+    fi
+    printf '%s\n' "$session_json" | jq -r '
+      def duration:
+        if . == null then "-" elif . >= 86400 then "\(./86400|floor)d \((.%86400)/3600|floor)h \((.%3600)/60|floor)m"
+        elif . >= 3600 then "\(./3600|floor)h \((.%3600)/60|floor)m \(.%60)s"
+        elif . >= 60 then "\(./60|floor)m \(.%60)s" else "\(.)s" end;
+      "Session:       \(.session_id)",
+      "Status:        \(if .active then "ACTIVE" else "CLOSED" end)",
+      "Identity:      \(.identity // "unmapped")",
+      "Access:        \(.login_user // "?")@\(.hostname // "?") from \(.source_ip // "?")",
+      "Authentication:\(.auth_method // "unknown" | " " + .)",
+      "Current user:  \(.current_user // "-")",
+      "Justification: \(.purpose // "not recorded")",
+      "Active for:    \(.active_duration_seconds | duration)",
+      (if .active then empty else "Connected for: \(.duration_seconds | duration)" end),
+      "",
+      "Timeline:",
+      (.events[] |
+        "  \(.timestamp // "unknown")  " +
+        (if .event == "ssh.auth.success" then "Authenticated from \(.source_ip // "?")"
+         elif .event == "ssh.session.start" then "Session opened"
+         elif .event == "ssh.session.purpose.required" then "Justification requested"
+         elif .event == "ssh.session.purpose.recorded" then "Justification accepted"
+         elif .event == "command.executed" then "\(.current_user // .login_user // "?")$ \(.command // "") [exit \(.exit_code // "?")]"
+         elif .event == "privilege.transition" then "Privilege \(.from_user // "?") -> \(.to_user // "?")"
+         elif .event == "ssh.session.end" then "Session closed (\(.closure_source // "unknown"))"
+         else .event end))'
+}
+
+usage()
+{
+    cat <<USAGE
+usage: $PROGRAM <command> [args]
+
+commands:
+  status                 show a summary of AuthTrail's current state
+  test                   run local self-checks (config, permissions, log dir)
+  test-slack             send a real test message to the configured webhook
+  index-keys             scan authorized_keys files and update keys.map
+  sessions               list currently active sessions
+  recent [--json|--jsonl] [N]          show recent events
+  recent-auth [--json|--jsonl] [N]     show authentication events
+  recent-commands [--json|--jsonl] [N] show command events
+  recent-purpose [--json|--jsonl] [N]  show justification events
+  purpose-status         show purpose-gate configuration and runtime state
+  session [--json] [session-id] show active sessions or one session
+  identity <fingerprint> print the identity mapped to a key fingerprint
+  verify                 check configuration/permissions without side effects
+  version                print the authtrailctl version
+USAGE
+}
+
+main()
+{
+    load_config
+    require_runtime
+
+    sub=${1:-}
+    [ $# -gt 0 ] && shift
+
+    case "$sub" in
+        status) cmd_status ;;
+        test) cmd_test ;;
+        test-slack) cmd_test_slack ;;
+        index-keys) cmd_index_keys ;;
+        sessions) cmd_sessions ;;
+        recent) cmd_recent_view '.' "$@" ;;
+        recent-auth) cmd_recent_view '((.event? // "") | startswith("ssh.auth."))' "$@" ;;
+        recent-commands) cmd_recent_view '((.event? // "") == "command.executed" or (.event? // "") == "audit.exec")' "$@" ;;
+        recent-purpose) cmd_recent_view '((.event? // "") | startswith("ssh.session.purpose."))' "$@" ;;
+        purpose-status) cmd_purpose_status ;;
+        session)
+            cmd_session "$@"
+            ;;
+        identity)
+            [ -n "${1:-}" ] || die "usage: $PROGRAM identity <fingerprint>"
+            lookup_identity "$1"
+            printf '\n'
+            ;;
+        verify) cmd_verify ;;
+        version) printf '%s %s\n' "$PROGRAM" "$AUTHTRAIL_VERSION" ;;
+        '' | help | -h | --help) usage ;;
+        *)
+            printf '%s: unknown command: %s\n' "$PROGRAM" "$sub" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+}
+
+# Guard so tests/ can source this file for its functions without running a command.
+if [ "${AUTHTRAIL_SELFTEST:-0}" != '1' ]; then
+    main "$@"
+fi

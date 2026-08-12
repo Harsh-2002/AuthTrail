@@ -1,0 +1,9 @@
+/var/log/authtraild/events.jsonl {
+    daily
+    rotate 90
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root adm
+}

@@ -1,0 +1,3 @@
+# AuthTrail key registry - fingerprint is authoritative, identity is an admin-maintained label. No secrets in this file.
+# Format: SHA256:<fingerprint>|<identity>   Populate with: authtrailctl index-keys
+# Example: SHA256:AAAA...|alice@example.com
