@@ -20,6 +20,8 @@ Read the root `CLAUDE.md` entry point first for the required documentation order
 sh tests/test-json.sh              # run a single test file directly (each is self-contained)
 sudo ./install.sh                  # one-command local-only install; reports missing packages without installing them
 sudo ./install.sh --slack-webhook='https://hooks.slack.com/services/...'
+sudo ./install.sh --enable-auditd      # explicit high-volume process-audit opt-in
+sudo ./install.sh --disable-auditd     # no global audit rule load/reload
 sudo ./uninstall.sh [--purge]      # uninstall; --purge also deletes logs/config
 sudo atctl verify                  # static config/permission checks, no side effects
 sudo atctl test-slack              # send one real Slack message with the configured webhook
@@ -98,7 +100,8 @@ Full design writeup, including the two design decisions that aren't obvious from
   target already exists (`install_template_if_absent()` in `install.sh`) — a customized webhook
   or key registry must survive `install.sh` being re-run.
 - `auditd` (`audit/authtraild.rules`, `src/authtrail-audit-parser.sh`) is a separate, local-only,
-  on-demand evidence layer, not part of the real-time event flow — it needs kernel audit access
+  opt-in evidence layer, not part of the real-time event flow. The installer policy helpers live
+  in `src/install-auditd.sh`; disabled installs must never load or globally reload rules. It needs kernel audit access
   that most containers (including the project's own LXC test node) don't have.
 - `/var/log/authtraild/events.jsonl` is the only persistent application log. CLI category views
   filter its `event` field; legacy category files are preserved but never appended.

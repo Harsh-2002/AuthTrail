@@ -55,6 +55,14 @@ verifies delivery without posting an installation test card. Official Slack endp
 HTTPS enterprise relay hostnames are accepted when they use the standard `/services/...` path;
 HTTP URLs, credentials, ports, query strings, fragments, and malformed hostnames are rejected.
 
+Auditd process-execution evidence is disabled by default. Use `--enable-auditd` only after capacity
+and retention review; its global `execve`/`execveat` rules can be extremely high-volume on Docker
+and other busy production hosts. `--disable-auditd` explicitly disables the integration. When
+disabled, AuthTrail does not create or load audit rules and never reloads the host's global audit
+configuration. An upgrade removes only an unmodified AuthTrail-owned rule file and its tagged
+active rules; customized or unrelated audit configuration is left unchanged. Explicit enablement
+adds only AuthTrail's tagged rules directly and does not run a global `augenrules --load`.
+
 The installer must finish with all of the following already complete:
 
 - binaries, `atctl`, Bash completion, hooks, configuration, and systemd unit installed;

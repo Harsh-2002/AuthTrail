@@ -35,6 +35,9 @@ SSH access without deploying a bastion, database, web application, or full SIEM 
 - Non-interactive SSH remains automation-safe and never displays the justification interface.
 - Slack or network failure never delays canonical logging or an already accepted interactive shell.
 - AuthTrail composes with existing SSH and shell configuration and validates changes before reload.
+- AuthTrail owns only its clearly named files and guarded configuration blocks. Optional host
+  integrations are used only when explicitly enabled and never grant AuthTrail ownership of
+  another project's configuration.
 
 ## Supported platform and dependencies
 
@@ -42,7 +45,9 @@ The supported baseline is Debian/Ubuntu, RHEL-family, or Fedora with systemd, Op
 Bash, and `jq`. Git is required for the public bootstrap command; `curl` is required only when
 Slack is enabled.
 The core shell components use POSIX `/bin/sh`; only interactive Bash command capture and Bash
-completion require Bash syntax. `auditd` and `logrotate` are optional capabilities. Grafana Alloy
+completion require Bash syntax. `auditd` and `logrotate` are optional capabilities. Auditd is
+disabled by default and requires explicit opt-in because global exec auditing can be high-volume.
+Grafana Alloy
 and Loki are operator-managed integrations, not AuthTrail dependencies.
 
 ## Installation experience

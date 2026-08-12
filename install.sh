@@ -8,6 +8,8 @@ PROGRAM='install.sh'
 REPO_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck disable=SC1091
 . "$REPO_DIR/src/install-platform.sh"
+# shellcheck disable=SC1091
+. "$REPO_DIR/src/install-auditd.sh"
 
 PREFIX_SBIN=/usr/local/sbin
 PREFIX_LIB=/usr/local/lib/authtraild
@@ -26,11 +28,26 @@ BASH_HOOK_MARK_END='# END AUTHTRAIL COMMAND HOOK'
 
 SLACK_WEBHOOK=''
 SLACK_WEBHOOK_SUPPLIED=0
-SLACK_ROLLBACK=''
+CONFIG_ROLLBACK=''
 INSTALL_COMPLETE=0
+AUDITD_MODE='preserve'
 for arg in "$@"; do
     case "$arg" in
         --force-bash-hook) : ;;
+        --disable-auditd)
+            if [ "$AUDITD_MODE" = 'enable' ]; then
+                printf '%s: cannot combine --enable-auditd and --disable-auditd\n' "$PROGRAM" >&2
+                exit 2
+            fi
+            AUDITD_MODE='disable'
+            ;;
+        --enable-auditd)
+            if [ "$AUDITD_MODE" = 'disable' ]; then
+                printf '%s: cannot combine --enable-auditd and --disable-auditd\n' "$PROGRAM" >&2
+                exit 2
+            fi
+            AUDITD_MODE='enable'
+            ;;
         --slack-webhook=*)
             SLACK_WEBHOOK=${arg#--slack-webhook=}
             SLACK_WEBHOOK_SUPPLIED=1
@@ -44,9 +61,9 @@ done
 
 cleanup_install()
 {
-    if [ "$INSTALL_COMPLETE" -eq 0 ] && [ -n "$SLACK_ROLLBACK" ] && [ -f "$SLACK_ROLLBACK" ]; then
-        install -m 0600 -o root -g root "$SLACK_ROLLBACK" "$CONF_DIR/authtraild.conf" 2>/dev/null || :
-        rm -f "$SLACK_ROLLBACK"
+    if [ "$INSTALL_COMPLETE" -eq 0 ] && [ -n "$CONFIG_ROLLBACK" ] && [ -f "$CONFIG_ROLLBACK" ]; then
+        install -m 0600 -o root -g root "$CONFIG_ROLLBACK" "$CONF_DIR/authtraild.conf" 2>/dev/null || :
+        rm -f "$CONFIG_ROLLBACK"
     fi
 }
 trap cleanup_install EXIT
@@ -111,11 +128,26 @@ if [ "$SLACK_WEBHOOK_SUPPLIED" -eq 1 ]; then
     fi
 fi
 
+case "$AUDITD_MODE" in
+    enable) AUDITD_ENABLED=1 ;;
+    disable) AUDITD_ENABLED=0 ;;
+    preserve)
+        if ! AUDITD_ENABLED=$(auditd_setting_from_config "$CONF_DIR/authtraild.conf" 0); then
+            die 'invalid AUTH_TRAIL_AUDITD_ENABLED in existing configuration (expected 0 or 1)'
+        fi
+        ;;
+esac
+
 AUDITD_AVAILABLE=0
-if command -v auditctl >/dev/null 2>&1; then
+if [ "$AUDITD_ENABLED" -eq 1 ] && command -v auditctl >/dev/null 2>&1; then
     AUDITD_AVAILABLE=1
-else
+elif [ "$AUDITD_ENABLED" -eq 1 ]; then
     warn "auditd/auditctl not found - optional process-execution evidence is inactive (install with: $(package_install_command) auditd)"
+fi
+
+if [ "$AUDITD_ENABLED" -eq 1 ] && [ -f "$AUDIT_RULES_FILE" ] && \
+    ! authtrail_audit_rules_file_is_managed "$AUDIT_RULES_FILE"; then
+    die "$AUDIT_RULES_FILE exists but is not an unmodified AuthTrail rule file; refusing to overwrite it"
 fi
 
 LOGROTATE_AVAILABLE=0
@@ -198,6 +230,7 @@ append_config_default AUTH_TRAIL_PURPOSE_MAX_LENGTH 500
 append_config_default AUTH_TRAIL_PURPOSE_FULLSCREEN 1
 append_config_default AUTH_TRAIL_PURPOSE_CLEAR_AFTER 1
 append_config_default AUTH_TRAIL_PURPOSE_FAIL_MODE "'closed'"
+append_config_default AUTH_TRAIL_AUDITD_ENABLED 0
 append_config_default AUTH_TRAIL_SLACK_INCLUDE_PURPOSE 1
 append_config_default AUTH_TRAIL_SLACK_PROFILE "'actionable'"
 append_config_default AUTH_TRAIL_DATA_DIR "'$DATA_DIR'"
@@ -206,9 +239,32 @@ append_config_default AUTH_TRAIL_SLACK_QUEUE_MAX 1000
 append_config_default AUTH_TRAIL_SLACK_RETRY_MAX 8
 chmod 0600 "$CONF_DIR/authtraild.conf"
 
+if [ "$AUDITD_MODE" != 'preserve' ] || [ "$SLACK_WEBHOOK_SUPPLIED" -eq 1 ]; then
+    CONFIG_ROLLBACK=$(mktemp "$CONF_DIR/.authtraild.conf.pre-install.XXXXXX")
+    cp -p "$CONF_DIR/authtraild.conf" "$CONFIG_ROLLBACK"
+fi
+
+set_config_value()
+{
+    config_name=$1
+    config_value=$2
+    config_tmp=$(mktemp "$CONF_DIR/.authtraild.conf.XXXXXX")
+    awk -v name="$config_name" -v value="$config_value" '
+        BEGIN { written=0 }
+        index($0, name "=") == 1 { print name "=" value; written=1; next }
+        { print }
+        END { if (!written) print name "=" value }
+    ' "$CONF_DIR/authtraild.conf" >"$config_tmp"
+    install -m 0600 -o root -g root "$config_tmp" "$CONF_DIR/authtraild.conf"
+    rm -f "$config_tmp"
+}
+
+case "$AUDITD_MODE" in
+    enable) set_config_value AUTH_TRAIL_AUDITD_ENABLED 1 ;;
+    disable) set_config_value AUTH_TRAIL_AUDITD_ENABLED 0 ;;
+esac
+
 if [ "$SLACK_WEBHOOK_SUPPLIED" -eq 1 ]; then
-    SLACK_ROLLBACK=$(mktemp "$CONF_DIR/.authtraild.conf.pre-slack.XXXXXX")
-    cp -p "$CONF_DIR/authtraild.conf" "$SLACK_ROLLBACK"
     config_tmp=$(mktemp "$CONF_DIR/.authtraild.conf.XXXXXX")
     enabled_written=0
     webhook_written=0
@@ -262,25 +318,6 @@ else
         rm -f "$SSHD_DROPIN"
     fi
     die 'aborting install: sshd configuration would not have validated (SSH was never reloaded, nothing else was installed after this point)'
-fi
-
-# --- auditd rules (only when auditd is actually usable) -------------------------
-
-if [ "$AUDITD_AVAILABLE" -eq 1 ]; then
-    install -d -m 0750 -o root -g root /etc/audit/rules.d
-    backup_if_exists "$AUDIT_RULES_FILE"
-    install -m 0640 -o root -g root "$REPO_DIR/audit/authtraild.rules" "$AUDIT_RULES_FILE"
-    if command -v augenrules >/dev/null 2>&1; then
-        if augenrules --load >/dev/null 2>&1; then
-            log 'auditd rules loaded'
-        else
-            warn 'augenrules --load failed - see docs/operations.md (common in containers without kernel audit access)'
-        fi
-    else
-        warn 'augenrules not found - auditd rules were installed but not loaded'
-    fi
-else
-    log 'auditd not available - skipping audit rule installation (see docs/operations.md)'
 fi
 
 # --- Global Bash command hook, composed with existing prompt hooks ---------------
@@ -354,14 +391,42 @@ done
 
 "$PREFIX_SBIN/authtrailctl" purpose-status || die 'session-purpose self-test failed'
 
+# --- Optional auditd rules, applied only after the core install is healthy --------
+
+if [ "$AUDITD_ENABLED" -eq 1 ] && [ "$AUDITD_AVAILABLE" -eq 1 ]; then
+    install -d -m 0750 -o root -g root /etc/audit/rules.d
+    backup_if_exists "$AUDIT_RULES_FILE"
+    install -m 0640 -o root -g root "$REPO_DIR/audit/authtraild.rules" "$AUDIT_RULES_FILE"
+    if load_authtrail_audit_rules; then
+        log 'auditd rules loaded after explicit opt-in'
+    else
+        warn 'AuthTrail auditd rules were installed but could not be activated; no global audit reload was attempted'
+    fi
+elif [ "$AUDITD_ENABLED" -eq 1 ]; then
+    log 'auditd was explicitly enabled but is unavailable; no audit rules were installed'
+else
+    if [ -f "$AUDIT_RULES_FILE" ]; then
+        if authtrail_audit_rules_file_is_managed "$AUDIT_RULES_FILE"; then
+            disable_authtrail_audit_rules "$AUDIT_RULES_FILE"
+            log 'auditd integration disabled; removed only AuthTrail-managed exec rules'
+        else
+            warn "$AUDIT_RULES_FILE exists but is not an unmodified AuthTrail rule file; leaving it unchanged"
+        fi
+    else
+        log 'auditd integration disabled; audit configuration left unchanged'
+    fi
+fi
+
 if [ "$SLACK_WEBHOOK_SUPPLIED" -eq 1 ]; then
-    rm -f "$SLACK_ROLLBACK"
-    SLACK_ROLLBACK=''
     log 'Slack configured; the first eligible AuthTrail event will verify delivery'
 fi
 
 # --- Summary ------------------------------------------------------------------------
 
 INSTALL_COMPLETE=1
+if [ -n "$CONFIG_ROLLBACK" ]; then
+    rm -f "$CONFIG_ROLLBACK"
+    CONFIG_ROLLBACK=''
+fi
 log 'install complete'
 "$PREFIX_SBIN/authtrailctl" status

@@ -113,10 +113,11 @@ cmd_status()
         printf 'SSH integration: not installed\n'
     fi
 
-    if [ "$AUTH_TRAIL_AUDITD_ENABLED" = '1' ] && have_cmd auditctl; then
+    if [ "$AUTH_TRAIL_AUDITD_ENABLED" = '1' ] && have_cmd auditctl && \
+        [ -f /etc/audit/rules.d/90-authtraild.rules ]; then
         printf 'auditd integration: enabled\n'
     elif [ "$AUTH_TRAIL_AUDITD_ENABLED" = '1' ]; then
-        printf 'auditd integration: configured but auditctl unavailable on this host\n'
+        printf 'auditd integration: requested but rules are not active/installed\n'
     else
         printf 'auditd integration: disabled\n'
     fi
@@ -136,6 +137,7 @@ cmd_status()
     else
         printf 'Slack: disabled\n'
     fi
+
     queue_depth=$(slack_queue_depth)
     queue_age=$(slack_queue_oldest_age)
     if [ "$queue_depth" -gt 0 ]; then

@@ -5,6 +5,9 @@ set -eu
 umask 022
 
 PROGRAM='uninstall.sh'
+REPO_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck disable=SC1091
+. "$REPO_DIR/src/install-auditd.sh"
 
 PREFIX_SBIN=/usr/local/sbin
 PREFIX_LIB=/usr/local/lib/authtraild
@@ -73,10 +76,11 @@ fi
 # --- Remove auditd rules ---------------------------------------------------------
 
 if [ -f "$AUDIT_RULES_FILE" ]; then
-    rm -f "$AUDIT_RULES_FILE"
-    log "removed $AUDIT_RULES_FILE"
-    if command -v augenrules >/dev/null 2>&1; then
-        augenrules --load >/dev/null 2>&1 || :
+    if authtrail_audit_rules_file_is_managed "$AUDIT_RULES_FILE"; then
+        disable_authtrail_audit_rules "$AUDIT_RULES_FILE"
+        log "removed AuthTrail-managed $AUDIT_RULES_FILE"
+    else
+        warn "$AUDIT_RULES_FILE is customized; leaving it and active audit configuration unchanged"
     fi
 fi
 

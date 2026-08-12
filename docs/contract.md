@@ -26,6 +26,10 @@ and `security.md`/`architecture.md` for the reasoning.
 - Never removes an unrelated `PROMPT_COMMAND` or audit mechanism; AuthTrail composes with string
   and array prompt hooks and restores the prior Bash configuration if validation fails.
 - Never installs packages or configures Grafana Alloy.
+- Never modifies or removes another project's configuration. AuthTrail changes only its named
+  files and guarded blocks, and optional integrations require explicit operator intent.
+- Never creates, loads, or globally reloads auditd rules when `AUTH_TRAIL_AUDITD_ENABLED=0`.
+  Auditd process-execution capture is opt-in, and disabling it preserves unrelated/custom rules.
 - Never uses `eval`, on any value, trusted-looking or not.
 - Never builds JSON or a Slack payload by string-concatenating shell variables — always `jq`.
 

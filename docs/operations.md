@@ -70,10 +70,15 @@ automation never enter the purpose gate.
 
 ## Known limitations
 
+- **auditd is opt-in.** Global `execve`/`execveat` auditing can create substantial load and log
+  growth, especially on Docker hosts. Fresh installs leave it disabled. Enable it only with
+  `sudo ./install.sh --enable-auditd` after capacity review; disable it with
+  `sudo ./install.sh --disable-auditd`.
 - **auditd inside containers.** `auditctl`/`ausearch` need `CAP_AUDIT_CONTROL` and a real kernel
   audit netlink socket, which most containers (including the LXC node this project was built and
-  tested against) do not expose. `install.sh` detects this and skips loading audit rules with a
-  warning rather than failing; `authtrail-audit-parser.sh` no-ops the same way. This layer needs
+  tested against) do not expose. When explicitly enabled, `install.sh` detects this and skips
+  loading audit rules with a warning rather than failing; `authtrail-audit-parser.sh` no-ops the
+  same way. This layer needs
   validation on a real (non-container) host before being relied on in production.
 - **logrotate absence.** If `logrotate` isn't installed, the rotation config is still installed
   but nothing runs it until the package is present.

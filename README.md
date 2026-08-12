@@ -24,7 +24,8 @@ RHEL-family, and Fedora hosts with systemd and OpenSSH; missing prerequisites pr
 `apt-get`, `dnf`, or `yum` command before the server is changed.
 
 Requirements: Git, systemd, OpenSSH server, Bash, and `jq`. `curl` is required only when Slack is
-enabled; `auditd` and `logrotate` are optional.
+enabled; `auditd` and `logrotate` are optional. Global auditd process-execution capture is disabled
+by default; enable it deliberately with `--enable-auditd` only after reviewing host event volume.
 
 ## Use
 

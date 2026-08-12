@@ -43,6 +43,16 @@ sent to Slack. No regex-based redaction can guarantee removal of every secret th
 on a command line. Review your command-retention policy before relying on this alone, especially
 in a regulated environment.
 
+## Auditd resource impact
+
+Auditd process-execution capture is disabled by default. When explicitly enabled, AuthTrail's
+`execve` and `execveat` rules observe processes across the host rather than only SSH sessions.
+Container-dense and high-throughput systems can therefore produce substantial CPU, I/O, and audit
+log volume. Operators must size storage, rotation, backlog, and retention before enabling it.
+`--disable-auditd` never triggers a global audit rule reload and preserves unrelated or customized
+host audit configuration. Explicit enablement also avoids a global reload and adds only AuthTrail's
+tagged active rules.
+
 ## No `eval`, no replay
 
 AuthTrail observes commands; it never replays or evaluates them. Every audited string
