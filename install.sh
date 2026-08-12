@@ -355,17 +355,9 @@ done
 "$PREFIX_SBIN/authtrailctl" purpose-status || die 'session-purpose self-test failed'
 
 if [ "$SLACK_WEBHOOK_SUPPLIED" -eq 1 ]; then
-    if "$PREFIX_SBIN/authtrailctl" test-slack; then
-        rm -f "$SLACK_ROLLBACK"
-        SLACK_ROLLBACK=''
-        log 'Slack webhook validated successfully'
-    else
-        install -m 0600 -o root -g root "$SLACK_ROLLBACK" "$CONF_DIR/authtraild.conf"
-        rm -f "$SLACK_ROLLBACK"
-        SLACK_ROLLBACK=''
-        systemctl restart authtraild 2>/dev/null || :
-        die 'Slack webhook validation failed; restored the previous Slack configuration'
-    fi
+    rm -f "$SLACK_ROLLBACK"
+    SLACK_ROLLBACK=''
+    log 'Slack configured; the first eligible AuthTrail event will verify delivery'
 fi
 
 # --- Summary ------------------------------------------------------------------------

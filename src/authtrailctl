@@ -236,14 +236,7 @@ cmd_test_slack()
         die 'AUTH_TRAIL_SLACK_WEBHOOK_URL is not configured in '"$CONFIG_FILE"
     fi
 
-    payload=$(jq -nc --arg hostname "$AUTH_TRAIL_HOSTNAME" --arg profile "$AUTH_TRAIL_SLACK_PROFILE" \
-        '{text: ("AuthTrail Slack check passed for " + $hostname), blocks: [
-            {type:"section", text:{type:"mrkdwn", text:"*:white_check_mark: AuthTrail Slack check passed*"}},
-            {type:"section", fields:[
-                {type:"mrkdwn", text:("*Server*\n`" + $hostname + "`")},
-                {type:"mrkdwn", text:("*Delivery profile*\n`" + $profile + "`")}
-            ]}
-        ]}')
+    payload=$(build_test_slack_payload "$AUTH_TRAIL_HOSTNAME")
 
     # Process-local override so an operator can test a webhook before flipping the real config flag.
     AUTH_TRAIL_SLACK_ENABLED=1
@@ -306,6 +299,35 @@ cmd_index_keys()
     printf 'Indexed %s key(s) into %s\n' "$n" "$AUTH_TRAIL_KEY_MAP"
 }
 
+terminal_columns()
+{
+    case "${COLUMNS:-}" in
+        '' | *[!0-9]*) ;;
+        *) printf '%s' "$COLUMNS"; return ;;
+    esac
+    if [ -t 1 ] && have_cmd stty; then
+        terminal_size=$(stty size </dev/tty 2>/dev/null || :)
+        terminal_width=${terminal_size#* }
+        case "$terminal_width" in
+            '' | *[!0-9]*) ;;
+            *) printf '%s' "$terminal_width"; return ;;
+        esac
+    fi
+    printf '80'
+}
+
+table_cell()
+{
+    cell_value=$1
+    cell_width=$2
+    printf '%s\n' "${cell_value:--}" | awk -v width="$cell_width" '
+        {
+            gsub(/[[:cntrl:]]/, "?")
+            if (length($0) > width) print substr($0, 1, width - 3) "..."
+            else print
+        }'
+}
+
 cmd_sessions()
 {
     if [ ! -d "$AUTH_TRAIL_RUN_DIR/sessions" ]; then
@@ -314,7 +336,14 @@ cmd_sessions()
     fi
 
     found=0
-    printf '%-40s %-28s %-10s %-10s %-15s %-12s\n' 'SESSION' 'IDENTITY' 'LOGIN' 'CURRENT' 'SOURCE' 'ACTIVE'
+    display_width=$(terminal_columns)
+    if [ "$display_width" -ge 112 ]; then
+        display_mode=table
+        printf '%-36s %-28s %-10s %-10s %-15s %-8s\n' \
+            'SESSION' 'IDENTITY' 'LOGIN' 'CURRENT' 'SOURCE' 'ACTIVE'
+    else
+        display_mode=compact
+    fi
 
     for f in "$AUTH_TRAIL_RUN_DIR"/sessions/*; do
         [ -e "$f" ] || continue
@@ -339,7 +368,22 @@ cmd_sessions()
             [ -n "$cu" ] && current_user=$cu
         fi
 
-        printf '%-40s %-28s %-10s %-10s %-15s %-12s\n' "$sid" "$identity" "${login_user:--}" "${current_user:--}" "${source_ip:--}" "$active_for"
+        if [ "$display_mode" = table ]; then
+            printf '%-36s %-28s %-10s %-10s %-15s %-8s\n' \
+                "$(table_cell "$sid" 36)" \
+                "$(table_cell "$identity" 28)" \
+                "$(table_cell "$login_user" 10)" \
+                "$(table_cell "$current_user" 10)" \
+                "$(table_cell "$source_ip" 15)" \
+                "$(table_cell "$active_for" 8)"
+        else
+            [ "$found" -eq 1 ] || printf '\n'
+            printf 'Session:  %s\n' "$sid"
+            printf 'Identity: %s\n' "$identity"
+            printf 'Access:   %s -> %s from %s\n' \
+                "${login_user:--}" "${current_user:--}" "${source_ip:--}"
+            printf 'Active:   %s\n' "$active_for"
+        fi
     done
 
     [ "$found" -eq 1 ] || printf 'no active sessions\n'

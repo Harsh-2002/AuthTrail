@@ -16,8 +16,9 @@ Run this single command on a supported server with Git installed:
 sh -c 'if ! command -v git >/dev/null 2>&1; then . /etc/os-release 2>/dev/null || :; case "${ID:-}:${ID_LIKE:-}" in debian:*|ubuntu:*|*:*debian*) hint="sudo apt-get install git" ;; fedora:*|rhel:*|centos:*|rocky:*|almalinux:*|ol:*|amzn:*|*:*rhel*|*:*fedora*) if command -v dnf >/dev/null 2>&1; then hint="sudo dnf install git"; else hint="sudo yum install git"; fi ;; *) hint="install Git using your supported package manager" ;; esac; printf "AuthTrail bootstrap requires Git. %s\\n" "$hint" >&2; exit 1; fi; d=$(mktemp -d) || exit 1; trap "rm -rf \"$d\"" EXIT HUP INT TERM; git clone --depth 1 --branch main https://github.com/Harsh-2002/AuthTrail.git "$d" && sudo "$d/bootstrap.sh" "$@"' authtrail
 ```
 
-Append `--slack-webhook='https://hooks.slack.com/services/...'` after `authtrail` to enable and
-validate Slack in that same command. AuthTrail never installs packages. It supports Debian/Ubuntu,
+Append `--slack-webhook='https://hooks.slack.com/services/...'` after `authtrail` to enable Slack
+in that same command. The first eligible event verifies delivery without adding an installation
+test card to the channel. AuthTrail never installs packages. It supports Debian/Ubuntu,
 RHEL-family, and Fedora hosts with systemd and OpenSSH; missing prerequisites produce the correct
 `apt-get`, `dnf`, or `yum` command before the server is changed.
 

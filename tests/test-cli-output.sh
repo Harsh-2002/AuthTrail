@@ -16,16 +16,17 @@ AUTH_TRAIL_LOG_DIR="$TMPD/log"
 AUTH_TRAIL_RUN_DIR="$TMPD/run"
 mkdir -p "$AUTH_TRAIL_LOG_DIR" "$AUTH_TRAIL_RUN_DIR/sessions" "$AUTH_TRAIL_RUN_DIR/tty"
 sid=testhost-session-1
+long_identity='root@anuragvishwakarma@samespace.com'
 cat >"$AUTH_TRAIL_LOG_DIR/events.jsonl" <<JSON
-{"event":"ssh.auth.success","timestamp":"2026-08-12T10:00:00+00:00","hostname":"testhost","session_id":"$sid","identity":"alice@example.com","login_user":"root","source_ip":"10.0.0.1","auth_method":"publickey"}
-{"event":"ssh.session.start","timestamp":"2026-08-12T10:00:00+00:00","hostname":"testhost","session_id":"$sid","identity":"alice@example.com","login_user":"root","source_ip":"10.0.0.1","auth_method":"publickey"}
-{"event":"ssh.session.purpose.recorded","timestamp":"2026-08-12T10:00:05+00:00","hostname":"testhost","session_id":"$sid","identity":"alice@example.com","login_user":"root","purpose":"CHG-42 deploy release"}
+{"event":"ssh.auth.success","timestamp":"2026-08-12T10:00:00+00:00","hostname":"testhost","session_id":"$sid","identity":"$long_identity","login_user":"root","source_ip":"10.0.0.1","auth_method":"publickey"}
+{"event":"ssh.session.start","timestamp":"2026-08-12T10:00:00+00:00","hostname":"testhost","session_id":"$sid","identity":"$long_identity","login_user":"root","source_ip":"10.0.0.1","auth_method":"publickey"}
+{"event":"ssh.session.purpose.recorded","timestamp":"2026-08-12T10:00:05+00:00","hostname":"testhost","session_id":"$sid","identity":"$long_identity","login_user":"root","purpose":"CHG-42 deploy release"}
 {"event":"command.executed","timestamp":"2026-08-12T10:00:10+00:00","hostname":"testhost","session_id":"$sid","current_user":"root","command":"systemctl status api","exit_code":0}
 JSON
 now=$(epoch_now)
 cat >"$AUTH_TRAIL_RUN_DIR/sessions/$sid" <<STATE
 session_id=$sid
-identity=alice@example.com
+identity=$long_identity
 login_user=root
 source_ip=10.0.0.1
 tty=/dev/pts/1
@@ -35,6 +36,21 @@ STATE
 cat >"$AUTH_TRAIL_RUN_DIR/tty/pts_1" <<STATE
 current_user=root
 STATE
+
+COLUMNS=140
+wide_sessions=$(cmd_sessions)
+assert_contains 'wide session list keeps aligned header' "$wide_sessions" 'SESSION                              IDENTITY'
+assert_contains 'wide session list shows active duration' "$wide_sessions" '1m 5s'
+assert_contains 'wide session list safely clips long identity' "$wide_sessions" \
+    "$(table_cell "$long_identity" 28)"
+assert_not_contains 'wide session list does not overflow long identity' "$wide_sessions" "$long_identity"
+
+COLUMNS=80
+compact_sessions=$(cmd_sessions)
+assert_contains 'narrow session list uses readable labels' "$compact_sessions" "Session:  $sid"
+assert_contains 'narrow session list preserves full identity' "$compact_sessions" "Identity: $long_identity"
+assert_contains 'narrow session list combines access context' "$compact_sessions" 'Access:   root -> root from 10.0.0.1'
+unset COLUMNS
 
 human=$(cmd_session "$sid")
 assert_contains 'human session output has clear status' "$human" 'Status:        ACTIVE'

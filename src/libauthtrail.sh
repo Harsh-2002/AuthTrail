@@ -852,6 +852,11 @@ build_slack_payload()
     esac
 }
 
+build_test_slack_payload()
+{
+    jq -nc --arg hostname "$1" '{text: ("AuthTrail connection verified for " + $hostname)}'
+}
+
 build_login_slack_payload()
 {
     printf '%s' "$1" | jq -c '
@@ -864,11 +869,10 @@ build_login_slack_payload()
             {type:"mrkdwn", text:("*Identity*\n`" + (.identity // "unmapped") + "`")},
             {type:"mrkdwn", text:("*Account*\n`" + (.login_user // "unknown") + "`")},
             {type:"mrkdwn", text:("*Server*\n`" + (.hostname // "unknown") + "`")},
-            {type:"mrkdwn", text:("*Source*\n`" + (.source_ip // "unknown") + "`")},
-            {type:"mrkdwn", text:("*Authentication*\n`" + (.auth_method // "unknown") + "`")}
+            {type:"mrkdwn", text:("*Source*\n`" + (.source_ip // "unknown") + "`")}
           ]},
           {type:"context", elements: [
-            {type:"mrkdwn", text: ("Key `" + (.key_fingerprint // "n/a") + "` • Session `" + (.session_id // "n/a") + "`")}
+            {type:"mrkdwn", text: ("Authentication `" + (.auth_method // "unknown") + "` • Session `" + (.session_id // "n/a") + "`")}
           ]}
         ]
       }'
@@ -892,12 +896,11 @@ build_logout_slack_payload()
             {type:"mrkdwn", text:("*Identity*\n`" + (.identity // "unmapped") + "`")},
             {type:"mrkdwn", text:("*Account*\n`" + (.login_user // "unknown") + "`")},
             {type:"mrkdwn", text:("*Server*\n`" + (.hostname // "unknown") + "`")},
-            {type:"mrkdwn", text:("*Source*\n`" + (.source_ip // "unknown") + "`")},
-            {type:"mrkdwn", text:("*Active for*\n`" + ((.active_duration_seconds // .duration_seconds // 0)|duration) + "`")}
+            {type:"mrkdwn", text:("*Source*\n`" + (.source_ip // "unknown") + "`")}
           ]},
           {type:"section", text:{type:"plain_text", text:("Justification\n" + (.purpose // "not recorded"))}},
           {type:"context", elements: [
-            {type:"mrkdwn", text: ("Session `" + (.session_id // "n/a") + "`")}
+            {type:"mrkdwn", text: ("Active for `" + ((.active_duration_seconds // .duration_seconds // 0)|duration) + "` • Session `" + (.session_id // "n/a") + "`")}
           ]}
         ]
       }'
@@ -974,12 +977,11 @@ build_purpose_slack_payload()
             {type:"mrkdwn", text:("*Identity*\n`" + (.identity // "unmapped") + "`")},
             {type:"mrkdwn", text:("*Account*\n`" + (.login_user // "unknown") + "`")},
             {type:"mrkdwn", text:("*Server*\n`" + (.hostname // "unknown") + "`")},
-            {type:"mrkdwn", text:("*Source*\n`" + (.source_ip // "unknown") + "`")},
-            {type:"mrkdwn", text:("*Authentication*\n`" + (.auth_method // "unknown") + "`")}
+            {type:"mrkdwn", text:("*Source*\n`" + (.source_ip // "unknown") + "`")}
           ]},
-          {type:"section", text:{type:"plain_text", text:("Purpose\n" + (.purpose // "purpose not supplied"))}},
+          {type:"section", text:{type:"plain_text", text:("Justification\n" + (.purpose // "not supplied"))}},
           {type:"context", elements: [
-            {type:"mrkdwn", text:("Session `" + (.session_id // "n/a") + "`")}
+            {type:"mrkdwn", text:("Authentication `" + (.auth_method // "unknown") + "` • Session `" + (.session_id // "n/a") + "`")}
           ]}
         ]
       }'

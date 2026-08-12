@@ -75,4 +75,23 @@ logout_payload=$(build_logout_slack_payload "$sample_event")
 assert_contains 'logout payload shows human active duration' "$logout_payload" '1h 2m 5s'
 assert_contains 'logout payload retains session correlation' "$logout_payload" 'testhost-1'
 
+opened_payload=$(build_purpose_slack_payload "$sample_event")
+assert_eq 'opened card starts with session title' 'SSH session opened' \
+    "$(printf '%s' "$opened_payload" | jq -r '.blocks[0].text.text' | tr -d '*')"
+assert_eq 'opened card uses a balanced four-field grid' 4 \
+    "$(printf '%s' "$opened_payload" | jq -r '.blocks[1].fields | length')"
+assert_contains 'opened card uses justification wording' "$opened_payload" 'Justification'
+# shellcheck disable=SC2016 # literal Slack mrkdwn backticks, not shell expansion
+assert_contains 'opened card keeps authentication in context' "$opened_payload" 'Authentication `publickey`'
+
+closed_payload=$(build_logout_slack_payload "$sample_event")
+assert_eq 'closed card uses a balanced four-field grid' 4 \
+    "$(printf '%s' "$closed_payload" | jq -r '.blocks[1].fields | length')"
+
+test_payload=$(build_test_slack_payload testhost)
+assert_true 'test payload is valid JSON' payload_is_valid_json "$test_payload"
+assert_not_contains 'test payload omits delivery profile' "$test_payload" 'Delivery profile'
+assert_not_contains 'test payload omits actionable profile name' "$test_payload" 'actionable'
+assert_not_contains 'test payload omits check-passed wording' "$test_payload" 'check passed'
+
 test_summary

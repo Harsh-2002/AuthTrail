@@ -50,7 +50,8 @@ Before a production rollout, confirm:
 ## 2. Install in one command
 
 Use the README command unchanged for local auditing, or append the optional Slack webhook argument
-shown there. The installer validates Slack before it reports success.
+shown there. The installer validates the webhook format and configuration; the first eligible event
+verifies delivery without posting an installation test card.
 
 The installer must finish with all of the following already complete:
 
@@ -63,8 +64,8 @@ The installer must finish with all of the following already complete:
 - root-only persistent Slack queue created under `/var/lib/authtraild/slack-queue`.
 
 On an upgrade, omission of `--slack-webhook` preserves the existing Slack state. Supplying a new
-webhook validates a real delivery and restores the previous Slack configuration if validation
-fails. Existing configuration, identity labels, legacy category logs, and unrelated
+webhook atomically replaces the previous Slack configuration. Existing configuration, identity
+labels, legacy category logs, and unrelated
 `PROMPT_COMMAND` hooks must remain intact.
 
 Fresh installations create the canonical log as `root:root`; this portable default avoids relying
