@@ -20,9 +20,9 @@ nonempty()
     [ -n "$1" ] && [ "$1" != 'null' ]
 }
 
-sample_event='{"hostname":"testhost","environment":"production","identity":"alice@example.com","login_user":"root","source_ip":"10.20.30.40","auth_method":"publickey","tty":"/dev/pts/0","key_fingerprint":"SHA256:abc","session_id":"testhost-1","timestamp":"2026-08-12T17:20:31+05:30","current_user":"support","from_user":"root","to_user":"support","command":"su support","purpose":"Production maintenance","active_duration_seconds":3725,"duration_seconds":3730,"closure_source":"pam_session_closed","attempt_count":8,"window_seconds":300,"attempted_users":["root","admin"]}'
+sample_event='{"hostname":"testhost","environment":"production","identity":"alice@example.com","login_user":"root","source_ip":"10.20.30.40","auth_method":"publickey","tty":"/dev/pts/0","key_fingerprint":"SHA256:abc","session_id":"testhost-1","timestamp":"2026-08-12T17:20:31+05:30","current_user":"support","from_user":"root","to_user":"support","command":"su support","change_type":"identity_or_group","purpose":"Production maintenance","active_duration_seconds":3725,"duration_seconds":3730,"closure_source":"pam_session_closed","attempt_count":8,"window_seconds":300,"attempted_users":["root","admin"]}'
 
-for builder in build_login_slack_payload build_logout_slack_payload build_failure_slack_payload build_burst_slack_payload build_privilege_slack_payload build_purpose_slack_payload; do
+for builder in build_login_slack_payload build_logout_slack_payload build_failure_slack_payload build_burst_slack_payload build_privilege_slack_payload build_access_change_slack_payload build_purpose_slack_payload; do
     payload=$("$builder" "$sample_event")
     assert_true "$builder produces valid JSON" payload_is_valid_json "$payload"
     text=$(printf '%s' "$payload" | jq -r '.text')
@@ -44,6 +44,7 @@ AUTH_TRAIL_SLACK_LOGOUT=1
 AUTH_TRAIL_SLACK_FAILURE=1
 AUTH_TRAIL_SLACK_FAILURE_BURST=1
 AUTH_TRAIL_SLACK_PRIVILEGE=1
+AUTH_TRAIL_SLACK_ACCESS_CHANGES=1
 AUTH_TRAIL_SLACK_COMMAND_ALERTS=0
 AUTH_TRAIL_SLACK_INCLUDE_PURPOSE=1
 assert_false 'actionable profile suppresses pre-purpose session start' slack_enabled_for ssh.session.start
@@ -51,7 +52,15 @@ assert_true 'actionable profile sends interactive session end when dispatched' s
 assert_false 'actionable profile suppresses individual auth failure' slack_enabled_for ssh.auth.failure
 assert_true 'actionable profile sends a failure burst' slack_enabled_for ssh.auth.failure_burst
 assert_true 'actionable profile sends a privilege transition' slack_enabled_for privilege.transition
+assert_true 'actionable profile sends a critical access change' slack_enabled_for access.change
 assert_true 'actionable profile sends a purpose-confirmed session' slack_enabled_for ssh.session.purpose.recorded
+
+immediate_transition=$(printf '%s' "$sample_event" | jq -c '.command=null | .mechanism="sudo-i"')
+immediate_payload=$(build_privilege_slack_payload "$immediate_transition")
+assert_false 'immediate transition card never shows an unknown command' grep -q 'unknown' <<EOF
+$immediate_payload
+EOF
+assert_contains 'immediate transition card names its success evidence' "$immediate_payload" 'sudo-i session'
 
 AUTH_TRAIL_SLACK_PROFILE=verbose
 assert_true 'verbose profile sends session start' slack_enabled_for ssh.session.start
@@ -65,7 +74,7 @@ assert_false 'fallback text escapes a channel mention' grep -q '<!channel>' <<EO
 $(printf '%s' "$unsafe_payload" | jq -r '.text')
 EOF
 
-for builder in build_login_slack_payload build_logout_slack_payload build_burst_slack_payload build_privilege_slack_payload build_purpose_slack_payload; do
+for builder in build_login_slack_payload build_logout_slack_payload build_burst_slack_payload build_privilege_slack_payload build_access_change_slack_payload build_purpose_slack_payload; do
     payload=$("$builder" "$sample_event")
     assert_false "$builder omits environment badge" grep -q 'production' <<EOF
 $payload

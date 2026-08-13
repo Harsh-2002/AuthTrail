@@ -45,6 +45,8 @@ package_for_command()
         *:curl) printf 'curl' ;;
         *:git) printf 'git' ;;
         *:bash) printf 'bash' ;;
+        *:sudo) printf 'sudo' ;;
+        *:su) printf 'util-linux' ;;
         *:systemctl | *:journalctl) printf 'systemd' ;;
         debian:logger) printf 'util-linux' ;;
         rpm:logger) printf 'util-linux' ;;
@@ -59,6 +61,14 @@ package_for_command()
         *:sed) printf 'sed' ;;
         *:grep) printf 'grep' ;;
         *) printf 'coreutils' ;;
+    esac
+}
+
+pam_modules_package()
+{
+    case "$AUTHTRAIL_PLATFORM_FAMILY" in
+        debian) printf 'libpam-modules' ;;
+        rpm) printf 'pam' ;;
     esac
 }
 

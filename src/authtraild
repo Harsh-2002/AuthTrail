@@ -709,6 +709,158 @@ handle_purpose_event()
     esac
 }
 
+normalize_pam_tty()
+{
+    case "$1" in
+        /dev/*) printf '%s' "$1" ;;
+        pts/* | tty[0-9]*) printf '/dev/%s' "$1" ;;
+        *) return 1 ;;
+    esac
+}
+
+resolve_privilege_tty_file()
+{
+    privilege_tty=$1
+    privilege_pid=$2
+    normalized_tty=$(normalize_pam_tty "$privilege_tty" 2>/dev/null || :)
+    if [ -n "$normalized_tty" ]; then
+        resolved_tty_key=$(tty_key "$normalized_tty")
+        if [ -f "$AUTH_TRAIL_RUN_DIR/tty/$resolved_tty_key" ]; then
+            PRIVILEGE_TTY=$normalized_tty
+            PRIVILEGE_TTY_FILE="$AUTH_TRAIL_RUN_DIR/tty/$resolved_tty_key"
+            return 0
+        fi
+    fi
+    if [ -n "$privilege_pid" ]; then
+        resolved_tty_key=$(find_ancestor_tty_key "$privilege_pid" 2>/dev/null || :)
+        if [ -n "$resolved_tty_key" ] && [ -f "$AUTH_TRAIL_RUN_DIR/tty/$resolved_tty_key" ]; then
+            PRIVILEGE_TTY=$(kv_get "$AUTH_TRAIL_RUN_DIR/tty/$resolved_tty_key" tty)
+            PRIVILEGE_TTY_FILE="$AUTH_TRAIL_RUN_DIR/tty/$resolved_tty_key"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+sudo_command_is_shell()
+{
+    shell_command=$1
+    shell_program=${shell_command%% *}
+    shell_program=${shell_program##*/}
+    case "$shell_program" in
+        sh | bash | dash | zsh | ksh | fish | csh | tcsh) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+privilege_fact_process_valid()
+{
+    fact_service=$1
+    fact_pid=$2
+    case "$fact_pid" in '' | *[!0-9]*) return 1 ;; esac
+    fact_comm=$(ps -o comm= -p "$fact_pid" 2>/dev/null | awk 'NR==1 {print $1}')
+    case "$fact_service:$fact_comm" in
+        sudo:sudo | sudo-i:sudo | su:su | su-l:su) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+handle_privilege_event()
+{
+    msg=$1
+    [ "$AUTH_TRAIL_PRIVILEGE_MONITORING" = '1' ] || return 0
+
+    p_action=$(jraw "$msg" '.action // empty')
+    p_service=$(jraw "$msg" '.service // empty')
+    p_from=$(jraw "$msg" '.from_user // empty')
+    p_to=$(jraw "$msg" '.to_user // empty')
+    p_tty=$(jraw "$msg" '.tty // empty')
+    p_pid=$(jraw "$msg" '.pid // empty')
+    p_command=$(jraw "$msg" '.command // empty')
+    [ -n "$p_to" ] || return 0
+    privilege_fact_process_valid "$p_service" "$p_pid" || return 0
+
+    privilege_context="$AUTH_TRAIL_RUN_DIR/privilege/$p_pid"
+    if [ "$p_action" = close_session ] && [ -f "$privilege_context" ]; then
+        PRIVILEGE_TTY_FILE=$(kv_get "$privilege_context" tty_file)
+        PRIVILEGE_TTY=$(kv_get "$privilege_context" tty)
+    else
+        resolve_privilege_tty_file "$p_tty" "$p_pid" || return 0
+    fi
+    [ -f "$PRIVILEGE_TTY_FILE" ] || return 0
+
+    sid=$(kv_get "$PRIVILEGE_TTY_FILE" session_id)
+    [ -n "$sid" ] && [ -f "$AUTH_TRAIL_RUN_DIR/sessions/$sid" ] || return 0
+    state_user=$(kv_get "$PRIVILEGE_TTY_FILE" current_user)
+    event_from=$state_user
+    [ -n "$event_from" ] || event_from=$p_from
+    event_to=$p_to
+    emit_transition=1
+    case "$p_action" in
+        open_session)
+            [ -n "$event_from" ] && [ "$event_from" != "$event_to" ] || return 0
+            mkdir -p "$AUTH_TRAIL_RUN_DIR/privilege" 2>/dev/null || return 0
+            atomic_write "$privilege_context" "session_id=$sid
+from_user=$event_from
+to_user=$event_to
+tty=$PRIVILEGE_TTY
+tty_file=$PRIVILEGE_TTY_FILE"
+            [ "$state_user" != "$event_to" ] || emit_transition=0
+            ;;
+        close_session)
+            if [ -f "$privilege_context" ]; then
+                event_from=$(kv_get "$privilege_context" to_user)
+                event_to=$(kv_get "$privilege_context" from_user)
+            else
+                event_from=$p_to
+                event_to=$p_from
+            fi
+            [ -n "$event_from" ] && [ -n "$event_to" ] || return 0
+            [ "$state_user" != "$event_to" ] || emit_transition=0
+            if [ "$p_service" = sudo ] && ! sudo_command_is_shell "$p_command"; then
+                emit_transition=0
+            fi
+            rm -f "$privilege_context"
+            ;;
+        *) return 0 ;;
+    esac
+
+    kv_set "$PRIVILEGE_TTY_FILE" current_user "$event_to"
+    [ "$emit_transition" -eq 1 ] || return 0
+    sfile="$AUTH_TRAIL_RUN_DIR/sessions/$sid"
+    EV_EVENT='privilege.transition'
+    EV_SESSION_ID=$sid
+    EV_IDENTITY=$(kv_get "$sfile" identity)
+    EV_FINGERPRINT=$(kv_get "$sfile" fingerprint)
+    EV_LOGIN_USER=$(kv_get "$sfile" login_user)
+    EV_CURRENT_USER=$event_to
+    EV_FROM_USER=$event_from
+    EV_TO_USER=$event_to
+    EV_COMMAND=$p_command
+    EV_TTY=$PRIVILEGE_TTY
+    EV_PID=$p_pid
+    EV_SEVERITY='warning'
+    EV_EXTRA_JSON=$(jq -nc --arg mechanism "$p_service" --arg evidence pam \
+        --arg action "$p_action" '{mechanism:$mechanism,evidence:$evidence,transition_action:$action}')
+    emit_event >/dev/null
+}
+
+classify_access_change()
+{
+    access_command=$1
+    ACCESS_CHANGE_TYPE=''
+    if printf '%s\n' "$access_command" | grep -Eq '(^|[[:space:]/])(useradd|userdel|usermod|groupadd|groupdel|groupmod|passwd|chage)([[:space:]]|$)'; then
+        ACCESS_CHANGE_TYPE='identity_or_group'
+        return 0
+    fi
+    if printf '%s\n' "$access_command" | grep -Eq '(^|[[:space:]/])(cp|mv|rm|install|tee|chmod|chown|sed|vi|vim|nano|truncate)([[:space:]]|$)|(^|[^>])>>?[^>]' && \
+       printf '%s\n' "$access_command" | grep -Eq '(^|/)(authorized_keys)([[:space:]]|$)|/etc/(sudoers|sudoers\.d|pam\.d|ssh)(/|[[:space:]]|$)'; then
+        ACCESS_CHANGE_TYPE='access_configuration'
+        return 0
+    fi
+    return 1
+}
+
 # Detects privilege transitions from *observed* current-user change, not from guessing at su/sudo command text (section 19).
 handle_command_event()
 {
@@ -788,6 +940,24 @@ last_command="
     EV_EXIT_CODE=$c_exit
     emit_event >/dev/null
 
+    if [ "$AUTH_TRAIL_ACCESS_CHANGE_MONITORING" = '1' ] && [ "$c_exit" = '0' ] && \
+       classify_access_change "$redacted"; then
+        EV_EVENT='access.change'
+        EV_SESSION_ID=$sid
+        EV_IDENTITY=$identity
+        EV_FINGERPRINT=$fp
+        EV_LOGIN_USER=$login_user
+        EV_CURRENT_USER=$effective_user
+        EV_TTY=$c_tty
+        EV_CWD=$c_cwd
+        EV_COMMAND=$redacted
+        EV_PID=$c_pid
+        EV_EXIT_CODE=$c_exit
+        EV_SEVERITY='warning'
+        EV_EXTRA_JSON=$(jq -nc --arg change_type "$ACCESS_CHANGE_TYPE" '{change_type:$change_type,evidence:"shell_exit_success"}')
+        emit_event >/dev/null
+    fi
+
     if [ "$AUTH_TRAIL_SLACK_ENABLED" = '1' ] && [ "$AUTH_TRAIL_SLACK_COMMAND_ALERTS" = '1' ] && is_sensitive_command "$redacted"; then
         payload=$(build_sensitive_command_slack_payload "$AUTH_TRAIL_HOSTNAME" "$identity" "$effective_user" "$c_tty" "$redacted")
         alert_id=$(gen_event_id)
@@ -835,6 +1005,11 @@ ROUTE_EOF
             authtrail-purpose)
                 r_msg=$(jraw "$line" '.MESSAGE // empty')
                 handle_purpose_event "$r_msg"
+                continue
+                ;;
+            authtrail-privilege)
+                r_msg=$(jraw "$line" '.MESSAGE // empty')
+                handle_privilege_event "$r_msg"
                 continue
                 ;;
         esac

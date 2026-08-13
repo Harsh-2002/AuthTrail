@@ -30,6 +30,8 @@ AUTH_TRAIL_PURPOSE_FAIL_MODE=${AUTH_TRAIL_PURPOSE_FAIL_MODE:-closed}
 AUTH_TRAIL_SLACK_INCLUDE_PURPOSE=${AUTH_TRAIL_SLACK_INCLUDE_PURPOSE:-1}
 
 AUTH_TRAIL_AUDITD_ENABLED=${AUTH_TRAIL_AUDITD_ENABLED:-0}
+AUTH_TRAIL_PRIVILEGE_MONITORING=${AUTH_TRAIL_PRIVILEGE_MONITORING:-1}
+AUTH_TRAIL_ACCESS_CHANGE_MONITORING=${AUTH_TRAIL_ACCESS_CHANGE_MONITORING:-1}
 
 AUTH_TRAIL_SSH_UNIT=${AUTH_TRAIL_SSH_UNIT:-}
 
@@ -51,6 +53,7 @@ AUTH_TRAIL_SLACK_LOGOUT=${AUTH_TRAIL_SLACK_LOGOUT:-1}
 AUTH_TRAIL_SLACK_FAILURE=${AUTH_TRAIL_SLACK_FAILURE:-1}
 AUTH_TRAIL_SLACK_FAILURE_BURST=${AUTH_TRAIL_SLACK_FAILURE_BURST:-1}
 AUTH_TRAIL_SLACK_PRIVILEGE=${AUTH_TRAIL_SLACK_PRIVILEGE:-1}
+AUTH_TRAIL_SLACK_ACCESS_CHANGES=${AUTH_TRAIL_SLACK_ACCESS_CHANGES:-1}
 AUTH_TRAIL_SLACK_COMMAND_ALERTS=${AUTH_TRAIL_SLACK_COMMAND_ALERTS:-0}
 
 AUTH_TRAIL_KEY_MAP=${AUTH_TRAIL_KEY_MAP:-/etc/authtraild/keys.map}
@@ -161,6 +164,8 @@ validate_config()
     require_bool AUTH_TRAIL_PURPOSE_CLEAR_AFTER "$AUTH_TRAIL_PURPOSE_CLEAR_AFTER"
     require_bool AUTH_TRAIL_SLACK_INCLUDE_PURPOSE "$AUTH_TRAIL_SLACK_INCLUDE_PURPOSE"
     require_bool AUTH_TRAIL_AUDITD_ENABLED "$AUTH_TRAIL_AUDITD_ENABLED"
+    require_bool AUTH_TRAIL_PRIVILEGE_MONITORING "$AUTH_TRAIL_PRIVILEGE_MONITORING"
+    require_bool AUTH_TRAIL_ACCESS_CHANGE_MONITORING "$AUTH_TRAIL_ACCESS_CHANGE_MONITORING"
     require_bool AUTH_TRAIL_FAILURE_BURST_ENABLED "$AUTH_TRAIL_FAILURE_BURST_ENABLED"
     require_bool AUTH_TRAIL_SLACK_ENABLED "$AUTH_TRAIL_SLACK_ENABLED"
     require_bool AUTH_TRAIL_SLACK_LOGIN "$AUTH_TRAIL_SLACK_LOGIN"
@@ -168,6 +173,7 @@ validate_config()
     require_bool AUTH_TRAIL_SLACK_FAILURE "$AUTH_TRAIL_SLACK_FAILURE"
     require_bool AUTH_TRAIL_SLACK_FAILURE_BURST "$AUTH_TRAIL_SLACK_FAILURE_BURST"
     require_bool AUTH_TRAIL_SLACK_PRIVILEGE "$AUTH_TRAIL_SLACK_PRIVILEGE"
+    require_bool AUTH_TRAIL_SLACK_ACCESS_CHANGES "$AUTH_TRAIL_SLACK_ACCESS_CHANGES"
     require_bool AUTH_TRAIL_SLACK_COMMAND_ALERTS "$AUTH_TRAIL_SLACK_COMMAND_ALERTS"
     require_bool AUTH_TRAIL_SLACK_QUEUE_ENABLED "$AUTH_TRAIL_SLACK_QUEUE_ENABLED"
 
@@ -816,6 +822,7 @@ slack_enabled_for()
             ssh.session.end) [ "$AUTH_TRAIL_SLACK_LOGOUT" = '1' ] ;;
             ssh.auth.failure_burst) [ "$AUTH_TRAIL_SLACK_FAILURE_BURST" = '1' ] ;;
             privilege.transition) [ "$AUTH_TRAIL_SLACK_PRIVILEGE" = '1' ] ;;
+            access.change) [ "$AUTH_TRAIL_SLACK_ACCESS_CHANGES" = '1' ] ;;
             command.executed) [ "$AUTH_TRAIL_SLACK_COMMAND_ALERTS" = '1' ] ;;
             *) return 1 ;;
         esac
@@ -828,6 +835,7 @@ slack_enabled_for()
         ssh.auth.failure) [ "$AUTH_TRAIL_SLACK_FAILURE" = '1' ] ;;
         ssh.auth.failure_burst) [ "$AUTH_TRAIL_SLACK_FAILURE_BURST" = '1' ] ;;
         privilege.transition) [ "$AUTH_TRAIL_SLACK_PRIVILEGE" = '1' ] ;;
+        access.change) [ "$AUTH_TRAIL_SLACK_ACCESS_CHANGES" = '1' ] ;;
         ssh.session.purpose.recorded) [ "$AUTH_TRAIL_SLACK_LOGIN" = '1' ] && [ "$AUTH_TRAIL_SLACK_INCLUDE_PURPOSE" = '1' ] ;;
         command.executed) [ "$AUTH_TRAIL_SLACK_COMMAND_ALERTS" = '1' ] ;;
         *) return 1 ;;
@@ -865,6 +873,7 @@ build_slack_payload()
         ssh.auth.failure) build_failure_slack_payload "$ej" ;;
         ssh.auth.failure_burst) build_burst_slack_payload "$ej" ;;
         privilege.transition) build_privilege_slack_payload "$ej" ;;
+        access.change) build_access_change_slack_payload "$ej" ;;
         ssh.session.purpose.recorded) build_purpose_slack_payload "$ej" ;;
         *) return 1 ;;
     esac
@@ -973,12 +982,34 @@ build_privilege_slack_payload()
           {type:"section", fields: [
             {type:"mrkdwn", text:("*Identity*\n`" + (.identity // "unmapped") + "`")},
             {type:"mrkdwn", text:("*Server*\n`" + (.hostname // "unknown") + "`")},
-            {type:"mrkdwn", text:("*Account*\n`" + (.from_user // "?") + " -> " + (.to_user // "?") + "`")}
+            {type:"mrkdwn", text:("*Account*\n`" + (.from_user // "?") + " → " + (.to_user // "?") + "`")}
           ]},
-          {type:"section", text:{type:"plain_text", text:("Command\n" + (.command // "unknown"))}},
+          {type:"section", text:{type:"plain_text", text:
+            (if (.command // "") != "" then "Command\n" + .command
+             else "Confirmed by\n" + (.mechanism // "PAM") + " session" end)}},
           {type:"context", elements: [
             {type:"mrkdwn", text: ("Session `" + (.session_id // "n/a") + "`")}
           ]}
+        ]
+      }'
+}
+
+build_access_change_slack_payload()
+{
+    printf '%s' "$1" | jq -c '
+      def esc: gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;");
+      {
+        text: (("Critical access change by " + (.identity // "unmapped") + " on " + (.hostname // "unknown")) | esc),
+        blocks: [
+          {type:"section", text:{type:"mrkdwn", text:"*:warning: Critical access change*"}},
+          {type:"section", fields:[
+            {type:"mrkdwn", text:(("*Identity*\n`" + (.identity // "unmapped") + "`") | esc)},
+            {type:"mrkdwn", text:(("*Server*\n`" + (.hostname // "unknown") + "`") | esc)},
+            {type:"mrkdwn", text:(("*Account*\n`" + (.current_user // .login_user // "unknown") + "`") | esc)},
+            {type:"mrkdwn", text:(("*Change*\n`" + (.change_type // "access") + "`") | esc)}
+          ]},
+          {type:"section", text:{type:"mrkdwn", text:(("*Command*\n```" + (.command // "not available") + "```") | esc)}},
+          {type:"context", elements:[{type:"mrkdwn", text:(("Session `" + (.session_id // "unavailable") + "`") | esc)}]}
         ]
       }'
 }

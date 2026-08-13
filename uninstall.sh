@@ -8,6 +8,8 @@ PROGRAM='uninstall.sh'
 REPO_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck disable=SC1091
 . "$REPO_DIR/src/install-auditd.sh"
+# shellcheck disable=SC1091
+. "$REPO_DIR/src/install-pam.sh"
 
 PREFIX_SBIN=/usr/local/sbin
 PREFIX_LIB=/usr/local/lib/authtraild
@@ -24,6 +26,9 @@ BASHRC_FILE=/etc/bash.bashrc
 BASH_HOOK_MARK_BEGIN='# BEGIN AUTHTRAIL COMMAND HOOK - managed by install.sh, do not edit by hand'
 BASH_HOOK_MARK_END='# END AUTHTRAIL COMMAND HOOK'
 PROFILE_HOOK=/etc/profile.d/91-authtrail-session.sh
+PAM_SUDO_FILE=/etc/pam.d/sudo
+PAM_SUDO_I_FILE=/etc/pam.d/sudo-i
+PAM_SU_FILE=/etc/pam.d/su
 
 PURGE=0
 for arg in "$@"; do
@@ -100,6 +105,15 @@ if [ -f "$PROFILE_HOOK" ]; then
     rm -f "$PROFILE_HOOK"
     log "removed $PROFILE_HOOK"
 fi
+
+for pam_file in "$PAM_SUDO_FILE" "$PAM_SUDO_I_FILE" "$PAM_SU_FILE"; do
+    if [ -f "$pam_file" ] && pam_file_has_hook "$pam_file"; then
+        pam_tmp=$(mktemp /etc/pam.d/.authtrail-remove.XXXXXX)
+        pam_file_remove_hook "$pam_file" "$pam_tmp" || warn "could not remove AuthTrail hook from $pam_file"
+        rm -f "$pam_tmp"
+        log "removed AuthTrail hook from $pam_file"
+    fi
+done
 
 # --- Remove binaries/library ------------------------------------------------------
 

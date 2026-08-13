@@ -12,6 +12,8 @@ REPO_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 . "$REPO_DIR/src/install-auditd.sh"
 # shellcheck disable=SC1091
 . "$REPO_DIR/src/install-readiness.sh"
+# shellcheck disable=SC1091
+. "$REPO_DIR/src/install-pam.sh"
 
 PREFIX_SBIN=/usr/local/sbin
 PREFIX_LIB=/usr/local/lib/authtraild
@@ -24,6 +26,9 @@ SSHD_DROPIN=/etc/ssh/sshd_config.d/90-authtraild.conf
 SYSTEMD_UNIT=/etc/systemd/system/authtraild.service
 LOGROTATE_FILE=/etc/logrotate.d/authtraild
 AUDIT_RULES_FILE=/etc/audit/rules.d/90-authtraild.rules
+PAM_SUDO_FILE=/etc/pam.d/sudo
+PAM_SUDO_I_FILE=/etc/pam.d/sudo-i
+PAM_SU_FILE=/etc/pam.d/su
 BASHRC_FILE=/etc/bash.bashrc
 BASH_HOOK_MARK_BEGIN='# BEGIN AUTHTRAIL COMMAND HOOK - managed by install.sh, do not edit by hand'
 BASH_HOOK_MARK_END='# END AUTHTRAIL COMMAND HOOK'
@@ -33,6 +38,9 @@ SLACK_WEBHOOK_SUPPLIED=0
 CONFIG_ROLLBACK=''
 INSTALL_COMPLETE=0
 AUDITD_MODE='preserve'
+PAM_ROLLBACK_SUDO=''
+PAM_ROLLBACK_SUDO_I=''
+PAM_ROLLBACK_SU=''
 for arg in "$@"; do
     case "$arg" in
         --force-bash-hook) : ;;
@@ -67,6 +75,14 @@ cleanup_install()
         install -m 0600 -o root -g root "$CONFIG_ROLLBACK" "$CONF_DIR/authtraild.conf" 2>/dev/null || :
         rm -f "$CONFIG_ROLLBACK"
     fi
+    if [ "$INSTALL_COMPLETE" -eq 0 ]; then
+        [ -z "$PAM_ROLLBACK_SUDO" ] || cp -p "$PAM_ROLLBACK_SUDO" "$PAM_SUDO_FILE" 2>/dev/null || :
+        [ -z "$PAM_ROLLBACK_SUDO_I" ] || cp -p "$PAM_ROLLBACK_SUDO_I" "$PAM_SUDO_I_FILE" 2>/dev/null || :
+        [ -z "$PAM_ROLLBACK_SU" ] || cp -p "$PAM_ROLLBACK_SU" "$PAM_SU_FILE" 2>/dev/null || :
+    fi
+    [ -z "$PAM_ROLLBACK_SUDO" ] || rm -f "$PAM_ROLLBACK_SUDO"
+    [ -z "$PAM_ROLLBACK_SUDO_I" ] || rm -f "$PAM_ROLLBACK_SUDO_I"
+    [ -z "$PAM_ROLLBACK_SU" ] || rm -f "$PAM_ROLLBACK_SU"
 }
 trap cleanup_install EXIT
 
@@ -100,7 +116,7 @@ report_missing_prerequisites()
 
 missing_commands=''
 missing_packages=''
-for c in systemctl journalctl sshd ssh-keygen bash jq awk sed grep cut tr date \
+for c in systemctl journalctl sshd ssh-keygen bash sudo su jq awk sed grep cut tr date \
     hostname logger ps stat install mktemp od find sort getent tail wc chmod chown readlink ln \
     cp mv rm sleep dirname id; do
     if ! command -v "$c" >/dev/null 2>&1; then
@@ -113,6 +129,13 @@ for c in systemctl journalctl sshd ssh-keygen bash jq awk sed grep cut tr date \
     fi
 done
 report_missing_prerequisites
+
+if [ ! -f "$PAM_SUDO_FILE" ] || [ ! -f "$PAM_SU_FILE" ]; then
+    die "PAM sudo/su service files are required (install with: $(package_install_command) sudo $(pam_modules_package))"
+fi
+if ! find /lib /usr/lib -type f -name pam_exec.so -print -quit 2>/dev/null | grep -q .; then
+    die "pam_exec.so is required for privilege-transition monitoring (install with: $(package_install_command) $(pam_modules_package))"
+fi
 
 slack_transport_required=0
 if slack_transport_required "$SLACK_WEBHOOK_SUPPLIED" "$CONF_DIR/authtraild.conf"; then
@@ -200,6 +223,7 @@ install -m 0750 -o root -g root "$REPO_DIR/src/authtrail-session-hook.sh" "$PREF
 install -m 0755 -o root -g root "$REPO_DIR/src/authtrail-bash-hook.sh" "$PREFIX_LIB/authtrail-bash-hook.sh"
 install -m 0750 -o root -g root "$REPO_DIR/src/authtrail-audit-parser.sh" "$PREFIX_LIB/authtrail-audit-parser.sh"
 install -m 0755 -o root -g root "$REPO_DIR/src/authtrail-purpose.sh" "$PREFIX_LIB/authtrail-purpose.sh"
+install -m 0755 -o root -g root "$REPO_DIR/src/authtrail-pam-hook.sh" "$PREFIX_LIB/authtrail-pam-hook.sh"
 install -m 0644 -o root -g root "$REPO_DIR/src/authtrailctl-completion.bash" "$PREFIX_LIB/authtrailctl-completion.bash"
 
 log 'installed binaries and library'
@@ -233,12 +257,15 @@ append_config_default AUTH_TRAIL_PURPOSE_FULLSCREEN 1
 append_config_default AUTH_TRAIL_PURPOSE_CLEAR_AFTER 1
 append_config_default AUTH_TRAIL_PURPOSE_FAIL_MODE "'closed'"
 append_config_default AUTH_TRAIL_AUDITD_ENABLED 0
+append_config_default AUTH_TRAIL_PRIVILEGE_MONITORING 1
+append_config_default AUTH_TRAIL_ACCESS_CHANGE_MONITORING 1
 append_config_default AUTH_TRAIL_SLACK_INCLUDE_PURPOSE 1
 append_config_default AUTH_TRAIL_SLACK_PROFILE "'actionable'"
 append_config_default AUTH_TRAIL_DATA_DIR "'$DATA_DIR'"
 append_config_default AUTH_TRAIL_SLACK_QUEUE_ENABLED 1
 append_config_default AUTH_TRAIL_SLACK_QUEUE_MAX 1000
 append_config_default AUTH_TRAIL_SLACK_RETRY_MAX 8
+append_config_default AUTH_TRAIL_SLACK_ACCESS_CHANGES 1
 chmod 0600 "$CONF_DIR/authtraild.conf"
 
 if [ "$AUDITD_MODE" != 'preserve' ] || [ "$SLACK_WEBHOOK_SUPPLIED" -eq 1 ]; then
@@ -368,6 +395,31 @@ log "installed global Bash command hook and atctl/authtrailctl completion into $
 install -m 0755 -o root -g root "$REPO_DIR/src/authtrail-session-hook.sh" /etc/profile.d/91-authtrail-session.sh
 log 'installed session hook into /etc/profile.d/91-authtrail-session.sh'
 
+# --- Successful sudo/su transition hook -----------------------------------------
+
+PAM_ROLLBACK_SUDO=$(mktemp /etc/pam.d/.sudo.authtrail.XXXXXX)
+PAM_ROLLBACK_SU=$(mktemp /etc/pam.d/.su.authtrail.XXXXXX)
+cp -p "$PAM_SUDO_FILE" "$PAM_ROLLBACK_SUDO"
+cp -p "$PAM_SU_FILE" "$PAM_ROLLBACK_SU"
+if [ -f "$PAM_SUDO_I_FILE" ]; then
+    PAM_ROLLBACK_SUDO_I=$(mktemp /etc/pam.d/.sudo-i.authtrail.XXXXXX)
+    cp -p "$PAM_SUDO_I_FILE" "$PAM_ROLLBACK_SUDO_I"
+fi
+backup_if_exists "$PAM_SUDO_FILE"
+backup_if_exists "$PAM_SU_FILE"
+pam_edit=$(mktemp /etc/pam.d/.authtrail-edit.XXXXXX)
+pam_file_install_hook "$PAM_SUDO_FILE" "$pam_edit" || die "could not install AuthTrail's managed PAM hook in $PAM_SUDO_FILE"
+if [ -f "$PAM_SUDO_I_FILE" ]; then
+    pam_file_install_hook "$PAM_SUDO_I_FILE" "$pam_edit" || die "could not install AuthTrail's managed PAM hook in $PAM_SUDO_I_FILE"
+fi
+pam_file_install_hook "$PAM_SU_FILE" "$pam_edit" || die "could not install AuthTrail's managed PAM hook in $PAM_SU_FILE"
+rm -f "$pam_edit"
+if ! pam_file_has_hook "$PAM_SUDO_FILE" || ! pam_file_has_hook "$PAM_SU_FILE" || \
+   { [ -f "$PAM_SUDO_I_FILE" ] && ! pam_file_has_hook "$PAM_SUDO_I_FILE"; }; then
+    die 'PAM transition hook validation failed'
+fi
+log 'installed immediate successful sudo/su transition monitoring without changing PAM control flow'
+
 # --- Self-test, activation --------------------------------------------------------
 
 "$PREFIX_SBIN/authtrailctl" verify || die 'configuration self-test failed'
@@ -433,5 +485,9 @@ if [ -n "$CONFIG_ROLLBACK" ]; then
     rm -f "$CONFIG_ROLLBACK"
     CONFIG_ROLLBACK=''
 fi
+rm -f "$PAM_ROLLBACK_SUDO" "$PAM_ROLLBACK_SUDO_I" "$PAM_ROLLBACK_SU"
+PAM_ROLLBACK_SUDO=''
+PAM_ROLLBACK_SUDO_I=''
+PAM_ROLLBACK_SU=''
 log 'install complete'
 "$PREFIX_SBIN/authtrailctl" status

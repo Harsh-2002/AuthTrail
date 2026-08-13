@@ -112,6 +112,10 @@ automation never enter the purpose gate.
   handles this by walking process ancestry (`ps -o ppid=,tty=`) until it finds an ancestor whose
   TTY is already a known session, then adopts the new TTY into that session lineage — this is
   what makes identity/`login_user` survive `sudo -i` correctly (verified live, see below).
+- **Privilege alerts are success-based and immediate.** The managed PAM hook reports successful
+  `sudo`/`su` session opens before the switched shell's first command. The Bash prompt hook is a
+  fallback, not the primary detector. Inspect with `atctl session <id>` and
+  `journalctl -t authtrail-privilege`.
 
 ## Test results
 

@@ -36,6 +36,8 @@ detect_supported_platform
 assert_eq 'detects Debian family' debian "$AUTHTRAIL_PLATFORM_FAMILY"
 assert_eq 'uses apt-get on Debian' apt-get "$AUTHTRAIL_PACKAGE_MANAGER"
 assert_eq 'maps Debian SSH client package' openssh-client "$(package_for_command ssh-keygen)"
+assert_eq 'maps Debian sudo package' sudo "$(package_for_command sudo)"
+assert_eq 'maps Debian PAM modules package' libpam-modules "$(pam_modules_package)"
 
 ubuntu_release="$TMPD/ubuntu-release"
 write_release "$ubuntu_release" ubuntu 'debian'
@@ -50,6 +52,7 @@ detect_supported_platform
 assert_eq 'detects RHEL family' rpm "$AUTHTRAIL_PLATFORM_FAMILY"
 assert_eq 'maps RPM SSH client package' openssh-clients "$(package_for_command ssh-keygen)"
 assert_eq 'maps RPM process package' procps-ng "$(package_for_command ps)"
+assert_eq 'maps RPM PAM modules package' pam "$(pam_modules_package)"
 rhel_hint="$(package_install_command) git"
 assert_true 'missing Git gets RHEL package-manager guidance' rhel_hint_is_valid
 

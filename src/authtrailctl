@@ -128,6 +128,17 @@ cmd_status()
         printf 'Command hook: not installed\n'
     fi
 
+    if [ "$AUTH_TRAIL_PRIVILEGE_MONITORING" = '1' ] && \
+       grep -Fq '/usr/local/lib/authtraild/authtrail-pam-hook.sh' /etc/pam.d/sudo 2>/dev/null && \
+       { [ ! -f /etc/pam.d/sudo-i ] || grep -Fq '/usr/local/lib/authtraild/authtrail-pam-hook.sh' /etc/pam.d/sudo-i 2>/dev/null; } && \
+       grep -Fq '/usr/local/lib/authtraild/authtrail-pam-hook.sh' /etc/pam.d/su 2>/dev/null; then
+        printf 'Privilege monitoring: immediate (PAM)\n'
+    elif [ "$AUTH_TRAIL_PRIVILEGE_MONITORING" = '1' ]; then
+        printf 'Privilege monitoring: requested but PAM hooks are incomplete\n'
+    else
+        printf 'Privilege monitoring: disabled\n'
+    fi
+
     if [ "$AUTH_TRAIL_SLACK_ENABLED" = '1' ]; then
         if [ -n "$AUTH_TRAIL_SLACK_WEBHOOK_URL" ]; then
             printf 'Slack: enabled (webhook configured, %s profile)\n' "$AUTH_TRAIL_SLACK_PROFILE"
@@ -190,6 +201,14 @@ cmd_verify()
     check 'key map file readable' [ -r "$AUTH_TRAIL_KEY_MAP" ]
     check 'sensitive-commands file readable' [ -r "$AUTH_TRAIL_SENSITIVE_COMMANDS" ]
     check 'redact file readable' [ -r "$AUTH_TRAIL_REDACT_FILE" ]
+    if [ "$AUTH_TRAIL_PRIVILEGE_MONITORING" = '1' ]; then
+        check 'sudo PAM transition hook installed' grep -Fq '/usr/local/lib/authtraild/authtrail-pam-hook.sh' /etc/pam.d/sudo
+        if [ -f /etc/pam.d/sudo-i ]; then
+            check 'sudo-i PAM transition hook installed' grep -Fq '/usr/local/lib/authtraild/authtrail-pam-hook.sh' /etc/pam.d/sudo-i
+        fi
+        check 'su PAM transition hook installed' grep -Fq '/usr/local/lib/authtraild/authtrail-pam-hook.sh' /etc/pam.d/su
+        check 'PAM transition helper executable' [ -x /usr/local/lib/authtraild/authtrail-pam-hook.sh ]
+    fi
     check 'jq can parse a sample event' jq -e . <<'JSON'
 {"schema_version":1,"event":"system.start"}
 JSON
@@ -526,6 +545,7 @@ cmd_session()
          elif .event == "ssh.session.purpose.recorded" then "Justification accepted"
          elif .event == "command.executed" then "\(.current_user // .login_user // "?")$ \(.command // "") [exit \(.exit_code // "?")]"
          elif .event == "privilege.transition" then "Privilege \(.from_user // "?") -> \(.to_user // "?")"
+         elif .event == "access.change" then "Critical access change (\(.change_type // "access")): \(.command // "")"
          elif .event == "ssh.session.end" then "Session closed (\(.closure_source // "unknown"))"
          else .event end))'
 }

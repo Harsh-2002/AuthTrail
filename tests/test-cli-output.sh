@@ -16,7 +16,7 @@ AUTH_TRAIL_LOG_DIR="$TMPD/log"
 AUTH_TRAIL_RUN_DIR="$TMPD/run"
 mkdir -p "$AUTH_TRAIL_LOG_DIR" "$AUTH_TRAIL_RUN_DIR/sessions" "$AUTH_TRAIL_RUN_DIR/tty"
 sid=testhost-session-1
-long_identity='root@anuragvishwakarma@samespace.com'
+long_identity='root@very-long-operator-name.example.com'
 cat >"$AUTH_TRAIL_LOG_DIR/events.jsonl" <<JSON
 {"event":"ssh.auth.success","timestamp":"2026-08-12T10:00:00+00:00","hostname":"testhost","session_id":"$sid","identity":"$long_identity","login_user":"root","source_ip":"10.0.0.1","auth_method":"publickey"}
 {"event":"ssh.session.start","timestamp":"2026-08-12T10:00:00+00:00","hostname":"testhost","session_id":"$sid","identity":"$long_identity","login_user":"root","source_ip":"10.0.0.1","auth_method":"publickey"}

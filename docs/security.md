@@ -53,6 +53,18 @@ log volume. Operators must size storage, rotation, backlog, and retention before
 host audit configuration. Explicit enablement also avoids a global reload and adds only AuthTrail's
 tagged active rules.
 
+## PAM integration
+
+The installer adds one `session optional pam_exec.so ...authtrail-pam-hook.sh` line to the
+existing `sudo` and `su` PAM service files. `optional` reporting failure can never grant access,
+deny access, or change the result of the PAM stack. The helper always exits successfully, treats
+PAM environment values as untrusted JSON strings, and only writes a local journald fact. The
+daemon accepts a fact only while its reported parent PID is a live `sudo` or `su` process and
+derives the previous account from its own session state rather than trusting caller text. This
+prevents direct invocation of the helper or a copied journal message from changing session state.
+The daemon remains the sole runtime-state writer. Installation retains rollback copies, verifies the
+exact managed line, and uninstall removes only that exact line and marker.
+
 ## No `eval`, no replay
 
 AuthTrail observes commands; it never replays or evaluates them. Every audited string

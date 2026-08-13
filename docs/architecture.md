@@ -42,6 +42,11 @@
              TTY state, writes command.executed
 ```
 
+Successful `sudo` and `su` PAM session events take a parallel local path through
+`authtrail-pam-hook.sh`, journald (`authtrail-privilege`), and the daemon. The hook reports facts
+only; `authtraild` performs SSH-session correlation, state updates, canonical persistence,
+deduplication, and Slack dispatch.
+
 For a real interactive SSH terminal, the session hook invokes `authtrail-purpose.sh` before the
 normal prompt. The helper sends a random-token query through journald; only `authtraild` resolves
 the existing session, validates and persists the purpose, and writes the acknowledgement under
@@ -84,12 +89,17 @@ through `logger` and never write state directly.
 
 ## Privilege transition detection
 
-Rather than pattern-matching `su`/`sudo` command text (which can't tell a requested transition
-from a successful one), `authtraild` compares the `user` field the bash hook reports on each
-command against the `current_user` already stored for that TTY. A mismatch is the actual
-confirmed evidence of a successful account switch — it emits `privilege.transition` (with the
-previous command attached as context) and updates the TTY state before logging the new
-`command.executed`. See `handle_command_event()` in `src/authtraild`.
+PAM `open_session` is the authoritative immediate success signal for `sudo` and `su`. The managed
+`pam_exec.so` hook emits a local fact after authentication/account checks succeed; the daemon
+correlates its TTY or process ancestry to the SSH session, emits `privilege.transition`, and
+updates `current_user` before a command is run. PAM close-session evidence records returns from
+interactive switched shells. One-off `sudo -u` delegation emits its successful outward transition
+without a noisy synthetic return alert. The Bash hook's observed-user comparison remains a
+fallback and naturally deduplicates because PAM already updated the TTY state.
+
+Successful identity/group administration commands and mutating commands targeting
+`authorized_keys`, `/etc/sudoers*`, `/etc/pam.d`, or `/etc/ssh` additionally emit `access.change`
+after a zero exit status. This is deliberately a narrow Slack policy, not general command spam.
 
 ## Correlating session end
 

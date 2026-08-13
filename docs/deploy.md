@@ -72,6 +72,7 @@ The installer must finish with all of the following already complete:
 - mandatory interactive justification gate ready;
 - Slack enabled and tested when a webhook was supplied;
 - root-only persistent Slack queue created under `/var/lib/authtraild/slack-queue`.
+- immediate transition hooks installed as exact optional PAM session lines for `sudo` and `su`.
 
 After systemd reports `authtraild` active, the installer waits up to 30 seconds for the daemon's
 purpose runtime policy. A timeout is a real readiness failure and points to
@@ -97,6 +98,10 @@ sudo atctl purpose-status
 sudo sshd -t
 sudo systemctl is-active authtraild
 ```
+
+`atctl verify` checks the `sudo`, optional `sudo-i`, and `su` PAM service entries plus the
+executable helper. The installer takes transaction-scoped copies of those PAM files and restores them if any later installation step
+fails. It never replaces a PAM stack or changes an existing control flag.
 
 Expected state:
 

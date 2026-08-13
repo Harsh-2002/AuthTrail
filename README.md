@@ -4,6 +4,10 @@ A lightweight, Linux-native audit trail for SSH access on supported Linux server
 connected, from where, with which key, what they did, account transitions, session purpose, and
 when the session closed — including on shared accounts such as `root`.
 
+Successful `sudo`/`su` account changes are recorded and alerted immediately through a narrowly
+managed PAM session hook. Slack stays high-signal: lifecycle, privilege transitions, failure
+bursts, and critical identity/access configuration changes—not every shell command.
+
 It is not a SIEM, firewall, or SSH blocker. Interactive SSH requires a recorded business
 justification; automation such as Ansible, SCP, SFTP, rsync, and remote commands remains
 non-interactive and purpose-free.

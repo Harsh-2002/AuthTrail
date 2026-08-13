@@ -120,8 +120,14 @@ composes with existing string or array `PROMPT_COMMAND` values and does not repl
 hooks. Command redaction is best-effort and cannot guarantee removal of every secret.
 
 Privilege transitions are emitted only after an observed current-user change, not merely because
-a command contains `sudo` or `su`. The original mapped SSH identity remains immutable while
-`current_user` reflects the effective account.
+a command contains `sudo` or `su`. PAM confirms successful `sudo`/`su` transitions immediately,
+including nested and root-to-user changes; the prompt hook is a deduplicated fallback. The
+original mapped SSH identity remains immutable while `current_user` reflects the effective account.
+
+Slack also receives a deliberately small set of successful critical access changes: user/group
+administration (`useradd`, `userdel`, `usermod`, `groupadd`, `groupdel`, `groupmod`, `passwd`,
+`chage`) and mutations targeting `authorized_keys`, `/etc/sudoers*`, `/etc/pam.d`, or `/etc/ssh`.
+Routine commands remain local-only.
 
 ## Slack notification policy
 

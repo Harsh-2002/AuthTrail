@@ -27,7 +27,8 @@ and `security.md`/`architecture.md` for the reasoning.
   and array prompt hooks and restores the prior Bash configuration if validation fails.
 - Never installs packages or configures Grafana Alloy.
 - Never modifies or removes another project's configuration. AuthTrail changes only its named
-  files and guarded blocks, and optional integrations require explicit operator intent.
+  files and guarded blocks. Its PAM integration adds and removes only one exact, clearly marked
+  `optional` session line in the existing `sudo` and `su` service files.
 - Never creates, loads, or globally reloads auditd rules when `AUTH_TRAIL_AUDITD_ENABLED=0`.
   Auditd process-execution capture is opt-in, and disabling it preserves unrelated/custom rules.
 - Never uses `eval`, on any value, trusted-looking or not.
@@ -37,6 +38,8 @@ and `security.md`/`architecture.md` for the reasoning.
 
 - The original human identity (from the SSH key fingerprint) stays attached to a session through
   `su`/`sudo`, even as the Linux account changes underneath it.
+- Successful PAM-backed account transitions are persisted and dispatched without waiting for a
+  subsequent shell command; duplicate PAM/prompt evidence produces only one transition.
 - Local JSONL + journald write happens before any Slack delivery attempt, for every event.
 - `/var/log/authtraild/events.jsonl` is the only persistent AuthTrail application log. Historical
   category files are preserved on upgrade but never receive new events.

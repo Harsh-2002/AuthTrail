@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+Added immediate, success-based `sudo`/`su` transition evidence through an AuthTrail-managed
+optional PAM session hook. Nested account changes now preserve their exact chain, update runtime
+state before the next shell command, and produce one canonical event and Slack alert. Added
+high-signal `access.change` alerts for successful identity/group administration and modifications
+to SSH, PAM, sudoers, and `authorized_keys` configuration.
+
 Made auditd process-execution capture explicit opt-in. Fresh installs default to disabled;
 `--enable-auditd` and `--disable-auditd` provide supported installer control. Disabled installs
 never create, load, or globally reload audit rules, and upgrades/uninstalls remove only unmodified
